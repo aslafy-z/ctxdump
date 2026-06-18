@@ -1,0 +1,7 @@
+{
+  "title": "Claude coding session",
+  "messages": [
+    {"role": "user", "content": "Write a python script"},
+    {"role": "assistant", "content": "Here is a script:\n```python\nprint('Hello')\n```"}
+  ]
+}

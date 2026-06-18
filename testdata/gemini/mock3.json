@@ -1,0 +1,7 @@
+{
+  "title": "Gemini brainstorm",
+  "messages": [
+    {"role": "user", "content": "List 3 ideas"},
+    {"role": "assistant", "content": "1. App\n2. Game\n3. Tool"}
+  ]
+}

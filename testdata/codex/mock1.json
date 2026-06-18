@@ -1,0 +1,7 @@
+{
+  "title": "A codex conversation",
+  "messages": [
+    {"role": "user", "content": "Hello codex"},
+    {"role": "assistant", "content": "Hello user, how can I help?"}
+  ]
+}

@@ -1,0 +1,3 @@
+{"type": "meta", "id": "123"}
+{"role": "user", "content": "This is a codex jsonl title fallback test"}
+{"role": "assistant", "content": "I understand."}
