@@ -1,5 +1,8 @@
 # ctxdump
 
+> [!CAUTION]
+> This project is really alphhhhhha and heavily vibecoded! Use at your own risk. Expect bugs, weird edge cases, and unexpected behaviors while this is refined.
+
 `ctxdump` is a CLI tool to find, search, and dump previous local AI assistant conversations. 
 
 It currently supports reading local history files from:
@@ -8,7 +11,7 @@ It currently supports reading local history files from:
 - **Gemini CLI** (`~/.gemini/sessions`, `~/.config/gemini/sessions`)
 - **Antigravity IDE & Terminal Agents** (`~/.gemini/antigravity-ide/brain`, `~/.gemini/antigravity/brain`)
 
-**Status**: V1 - This version discovers known local history files, lists them with an interactive TUI, and dumps their contents using agent-optimized formatting. It is designed primarily for other LLMs or coding agents that need to recover context from previous developer conversations.
+
 
 ## Installation
 
@@ -54,6 +57,16 @@ ctxdump list --sort date
 Search for a specific error or keyword across all your past AI conversations:
 ```bash
 ctxdump search "compile error"
+```
+
+List all conversations without launching the interactive TUI (useful for piping):
+```bash
+ctxdump list -n
+```
+
+Dump the search results as structured JSONL lines:
+```bash
+ctxdump search "auth bug" -n -o jsonl
 ```
 
 Dump the raw content of a conversation into a file:

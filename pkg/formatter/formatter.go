@@ -9,6 +9,9 @@ import (
 	"github.com/user/ctxdump/pkg/models"
 )
 
+// ValidFormats lists all supported output formats.
+var ValidFormats = []string{"agent", "markdown", "text", "raw", "json", "jsonl", "path"}
+
 // Options controls how conversations are formatted.
 type Options struct {
 	Format          string

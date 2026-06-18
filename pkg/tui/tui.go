@@ -117,11 +117,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, tea.Quit
 				}
 				
-				m.status = fmt.Sprintf("Copied '%s' to clipboard (Format: %s)!", i.Title(), m.copyFormat)
+				m.status = fmt.Sprintf("Copied '%s' to clipboard (Output: %s)!", i.Title(), m.copyFormat)
 				return m, tea.Quit
 			}
 
-		case "f":
+		case "o", "f":
 			if m.action != "resume" {
 				// Cycle format
 				idx := -1
@@ -133,7 +133,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				nextIdx := (idx + 1) % len(m.formats)
 				m.copyFormat = m.formats[nextIdx]
-				m.list.Title = fmt.Sprintf("Select a conversation to copy (Format: %s)", m.copyFormat)
+				m.list.Title = fmt.Sprintf("Select a conversation to copy (Output: %s)", m.copyFormat)
 				return m, nil
 			}
 		}
@@ -167,7 +167,7 @@ func Run(conversations []models.Conversation, initialQuery string, startInFilter
 	mList := list.New(items, delegate, 0, 0)
 
 	copyFormat := "agent"
-	validFormats := []string{"agent", "markdown", "text", "raw", "json", "path"}
+	validFormats := formatter.ValidFormats
 	if initialCopyFormat == "plain" {
 		initialCopyFormat = "text"
 	}
@@ -191,7 +191,7 @@ func Run(conversations []models.Conversation, initialQuery string, startInFilter
 	if action == "resume" {
 		m.list.Title = "Select a conversation to resume"
 	} else {
-		m.list.Title = fmt.Sprintf("Select a conversation to copy (Format: %s)", m.copyFormat)
+		m.list.Title = fmt.Sprintf("Select a conversation to copy (Output: %s)", m.copyFormat)
 	}
 	m.list.AdditionalShortHelpKeys = func() []key.Binding {
 		if action == "resume" {
@@ -202,7 +202,7 @@ func Run(conversations []models.Conversation, initialQuery string, startInFilter
 		}
 		return []key.Binding{
 			key.NewBinding(key.WithKeys("c", "enter"), key.WithHelp("c/enter", "copy")),
-			key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "format")),
+			key.NewBinding(key.WithKeys("o", "f"), key.WithHelp("o/f", "output")),
 			key.NewBinding(key.WithKeys("d", "delete"), key.WithHelp("d/del", "hide")),
 		}
 	}
@@ -215,7 +215,7 @@ func Run(conversations []models.Conversation, initialQuery string, startInFilter
 		}
 		return []key.Binding{
 			key.NewBinding(key.WithKeys("c", "enter"), key.WithHelp("c/enter", "copy")),
-			key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "cycle format")),
+			key.NewBinding(key.WithKeys("o", "f"), key.WithHelp("o/f", "cycle output")),
 			key.NewBinding(key.WithKeys("d", "delete"), key.WithHelp("d/delete", "hide/delete from disk")),
 		}
 	}
