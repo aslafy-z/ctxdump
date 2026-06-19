@@ -40,11 +40,14 @@ func (p *claudeProvider) List(opts Options) ([]models.Conversation, error) {
 			if name == "settings.json" || name == "settings.local.json" || name == "stats-cache.json" || name == "sessions-index.json" || name == "plugin.json" || name == ".mcp.json" {
 				return nil
 			}
-			title, snippet := extractClaudeMeta(path)
-			cwd := ""
-			if strings.Contains(path, ".claude/projects/") {
+			title, snippet, cwd := extractClaudeMeta(path)
+			
+			// Fallback: if not found in file and looks like an encoded path
+			if cwd == "" && strings.Contains(path, ".claude/projects/") {
 				dir := filepath.Dir(path)
 				base := filepath.Base(dir)
+				// Note: this naive decoding replaces all hyphens, which breaks paths with natural hyphens.
+				// However, it's better than nothing for legacy files missing the `cwd` field.
 				cwd = strings.ReplaceAll(base, "-", "/")
 			}
 
@@ -78,35 +81,64 @@ func (p *claudeProvider) List(opts Options) ([]models.Conversation, error) {
 	return conversations, nil
 }
 
-func extractClaudeMeta(path string) (string, string) {
+func extractClaudeMeta(path string) (string, string, string) {
 	f, err := os.Open(path)
 	if err != nil {
-		return "", ""
+		return "", "", ""
 	}
 	defer f.Close()
 	scanner := bufio.NewScanner(f)
+	// Increase buffer for very large lines (like attachments)
+	scanner.Buffer(make([]byte, 0, 256*1024), 2*1024*1024)
+
 	var title string
 	var firstMessage string
+	var cwd string
+
 	for i := 0; i < 200 && scanner.Scan(); i++ {
 		line := scanner.Text()
+		
+		// Fast-path json parsing for lines containing known keys to avoid unmarshaling everything
+		needsParse := false
 		if title == "" && strings.Contains(line, `"aiTitle":`) {
-			var obj map[string]interface{}
-			if json.Unmarshal([]byte(line), &obj) == nil {
-				if t, ok := obj["aiTitle"].(string); ok {
-					title = t
-				}
-			}
+			needsParse = true
+		}
+		if cwd == "" && strings.Contains(line, `"cwd":`) {
+			needsParse = true
 		}
 		if firstMessage == "" && strings.Contains(line, `"role":"user"`) {
+			needsParse = true
+		}
+
+		if needsParse {
 			var obj map[string]interface{}
 			if json.Unmarshal([]byte(line), &obj) == nil {
-				if msgObj, ok := obj["message"].(map[string]interface{}); ok {
-					if content, ok := msgObj["content"].(string); ok {
-						firstMessage = content
-					} else if contentArr, ok := msgObj["content"].([]interface{}); ok && len(contentArr) > 0 {
-						if firstElem, ok := contentArr[0].(map[string]interface{}); ok {
-							if text, ok := firstElem["text"].(string); ok {
-								firstMessage = text
+				if title == "" {
+					if t, ok := obj["aiTitle"].(string); ok {
+						title = t
+					} else if t, ok := obj["title"].(string); ok {
+						title = t
+					}
+				}
+				
+				if cwd == "" {
+					if c, ok := obj["cwd"].(string); ok {
+						cwd = c
+					}
+				}
+
+				if firstMessage == "" {
+					// Check "message" object
+					if msgObj, ok := obj["message"].(map[string]interface{}); ok {
+						if r, ok := msgObj["role"].(string); ok && r == "user" {
+							if content, ok := msgObj["content"].(string); ok {
+								firstMessage = content
+							} else if contentArr, ok := msgObj["content"].([]interface{}); ok && len(contentArr) > 0 {
+								if firstElem, ok := contentArr[0].(map[string]interface{}); ok {
+									if text, ok := firstElem["text"].(string); ok {
+										firstMessage = text
+									}
+								}
 							}
 						}
 					}
@@ -114,13 +146,13 @@ func extractClaudeMeta(path string) (string, string) {
 			}
 		}
 	}
+	
 	if firstMessage != "" {
 		if strings.HasPrefix(firstMessage, "<local-command-caveat>") {
 			endIdx := strings.Index(firstMessage, "</local-command-caveat>")
 			if endIdx != -1 {
 				firstMessage = strings.TrimSpace(firstMessage[endIdx+len("</local-command-caveat>"):])
 			} else {
-				// If no closing tag, try to skip a reasonable chunk
 				firstMessage = ""
 			}
 		}
@@ -130,7 +162,8 @@ func extractClaudeMeta(path string) (string, string) {
 			firstMessage = firstMessage[:97] + "..."
 		}
 	}
-	return title, firstMessage
+	
+	return title, firstMessage, cwd
 }
 
 func (p *claudeProvider) Dump(idOrFile string, opts Options) (models.Conversation, error) {
