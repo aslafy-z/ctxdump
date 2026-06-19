@@ -192,23 +192,25 @@ COMMANDS:{{range .Commands}}
 				Usage: "Resume a conversation in its provider's native editor",
 				Flags: []cli.Flag{
 					&cli.StringFlag{Name: "exec", Usage: "Custom execution template (e.g. 'editor {}' or 'editor {path}')"},
+					&cli.BoolFlag{Name: "print-cmd", Usage: "Print the resolved command without executing it"},
 				},
 				Action: func(ctx context.Context, cmd *cli.Command) error {
-					if cmd.Args().Len() == 0 {
-						return fmt.Errorf("missing <provider/editor> argument for resume")
-					}
-
 					var providerName string
 					var idOrFile string
+					var promptArgs []string
 
-					// Check if first arg is a known provider
+					if cmd.Args().Len() > 0 {
+						// Check if first arg is a known provider
 					if p, err := reg.Get(cmd.Args().Get(0)); err == nil {
 						providerName = p.Name()
 						if cmd.Args().Len() > 1 {
 							idOrFile = cmd.Args().Get(1)
+							promptArgs = cmd.Args().Slice()[2:]
 						}
-					} else {
-						idOrFile = cmd.Args().Get(0)
+						} else {
+							idOrFile = cmd.Args().Get(0)
+							promptArgs = cmd.Args().Slice()[1:]
+						}
 					}
 
 					var selected models.Conversation
@@ -226,10 +228,6 @@ COMMANDS:{{range .Commands}}
 						}
 						providerName = selected.Provider
 					} else {
-						if providerName == "" {
-							return fmt.Errorf("missing <provider> argument for interactive/latest resume")
-						}
-
 						providers, err := getProviders(providerName)
 						if err != nil {
 							return err
@@ -237,7 +235,10 @@ COMMANDS:{{range .Commands}}
 
 						convs := loadAndSortConversations(providers, opts, cmd.String("sort"))
 						if len(convs) == 0 {
-							return fmt.Errorf("no conversations found for provider %q", providerName)
+							if providerName != "" {
+								return fmt.Errorf("no conversations found for provider %q", providerName)
+							}
+							return fmt.Errorf("no conversations found")
 						}
 
 						if isTTY() && !cmd.Bool("non-interactive") {
@@ -252,12 +253,45 @@ COMMANDS:{{range .Commands}}
 						} else {
 							selected = convs[0]
 						}
+						providerName = selected.Provider
 					}
 
+					p, _ := reg.Get(providerName)
 					var execCmd *exec.Cmd
-					if cmd.String("exec") != "" {
+
+					if rp, ok := p.(provider.Resumer); ok && cmd.String("exec") == "" {
+						spec, err := rp.ResumeSpec(selected, opts, promptArgs)
+						if err != nil {
+							return err
+						}
+						
+						if cmd.Bool("print-cmd") {
+							cmdStr := ""
+							if spec.Dir != "" {
+								cmdStr += fmt.Sprintf("cd %s && ", spec.Dir)
+							}
+							if len(spec.Env) > 0 {
+								cmdStr += strings.Join(spec.Env, " ") + " "
+							}
+							cmdStr += spec.Command
+							for _, a := range spec.Args {
+								cmdStr += fmt.Sprintf(" %q", a)
+							}
+							fmt.Println(cmdStr)
+							return nil
+						}
+
+						execCmd = exec.Command(spec.Command, spec.Args...)
+						execCmd.Dir = spec.Dir
+						execCmd.Env = append(os.Environ(), spec.Env...)
+					} else if cmd.String("exec") != "" {
 						cmdStr := strings.ReplaceAll(cmd.String("exec"), "{}", selected.ID)
 						cmdStr = strings.ReplaceAll(cmdStr, "{path}", selected.FilePath)
+
+						if cmd.Bool("print-cmd") {
+							fmt.Println(cmdStr)
+							return nil
+						}
 
 						parts := strings.Fields(cmdStr)
 						if len(parts) == 0 {
@@ -265,6 +299,11 @@ COMMANDS:{{range .Commands}}
 						}
 						execCmd = exec.Command(parts[0], parts[1:]...)
 					} else {
+						if cmd.Bool("print-cmd") {
+							cmdStr := providerName + " " + selected.ID
+							fmt.Println(cmdStr)
+							return nil
+						}
 						execCmd = exec.Command(providerName, selected.ID)
 					}
 

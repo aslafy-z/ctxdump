@@ -2,7 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/atotto/clipboard"
@@ -80,9 +79,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "d", "delete", "x", "backspace":
 			i, ok := m.list.SelectedItem().(item)
 			if ok {
-				os.Remove(i.conv.FilePath)
 				m.list.RemoveItem(m.list.Index())
-				cmd := m.list.NewStatusMessage(fmt.Sprintf("Deleted '%s'", i.Title()))
+				cmd := m.list.NewStatusMessage(fmt.Sprintf("Hidden '%s'", i.Title()))
 				return m, cmd
 			}
 
@@ -209,14 +207,14 @@ func Run(conversations []models.Conversation, initialQuery string, startInFilter
 	m.list.AdditionalFullHelpKeys = func() []key.Binding {
 		if action == "resume" {
 			return []key.Binding{
-				key.NewBinding(key.WithKeys("c", "enter"), key.WithHelp("c/enter", "resume")),
-				key.NewBinding(key.WithKeys("d", "delete"), key.WithHelp("d/delete", "hide/delete from disk")),
+			key.NewBinding(key.WithKeys("c", "enter"), key.WithHelp("c/enter", "resume")),
+				key.NewBinding(key.WithKeys("d", "delete"), key.WithHelp("d/delete", "hide")),
 			}
 		}
 		return []key.Binding{
 			key.NewBinding(key.WithKeys("c", "enter"), key.WithHelp("c/enter", "copy")),
 			key.NewBinding(key.WithKeys("o", "f"), key.WithHelp("o/f", "cycle output")),
-			key.NewBinding(key.WithKeys("d", "delete"), key.WithHelp("d/delete", "hide/delete from disk")),
+			key.NewBinding(key.WithKeys("d", "delete"), key.WithHelp("d/delete", "hide")),
 		}
 	}
 

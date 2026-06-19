@@ -23,6 +23,19 @@ type Provider interface {
 	Dump(idOrFile string, opts Options) (models.Conversation, error)
 }
 
+// ResumeSpec defines the command to execute for resuming a conversation natively.
+type ResumeSpec struct {
+	Command string
+	Args    []string
+	Dir     string
+	Env     []string
+}
+
+// Resumer is an optional interface that providers can implement to support native resume.
+type Resumer interface {
+	ResumeSpec(conv models.Conversation, opts Options, prompt []string) (ResumeSpec, error)
+}
+
 // StripSystemTags removes common noisy system-injected XML blocks.
 func StripSystemTags(content string) string {
 	tags := []string{

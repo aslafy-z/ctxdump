@@ -81,11 +81,13 @@ ctxdump dump <id-or-file> --include-thoughts --timestamps
 
 Resume a previous conversation using its native CLI:
 ```bash
-# Opens an interactive menu to select a Codex session, then runs `codex <id>`
+# Opens an interactive menu to select a Codex session, then runs `codex resume <id>`
 ctxdump resume codex
 
-# Resumes a specific Claude session using a custom execution template
-ctxdump resume claude <id> --exec "claude --resume {path}"
+# Resumes a specific Claude session natively (`claude --resume <session-id> "Continue"`)
+ctxdump resume claude <id> -- "Continue"
+
+> **Note:** Native resume support currently works out of the box for Claude, Codex, and Gemini. Other providers may require the `--exec` flag.
 ```
 
 ## Future Scope

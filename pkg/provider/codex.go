@@ -133,6 +133,13 @@ func (p *codexProvider) parseFile(path string) (models.Conversation, error) {
 	// Try best-effort parsing (dumb mode)
 	var obj map[string]interface{}
 	if err := json.Unmarshal(data, &obj); err == nil {
+		if id, ok := obj["sessionId"].(string); ok {
+			conv.ResumeID = id
+		} else if id, ok := obj["session_id"].(string); ok {
+			conv.ResumeID = id
+		} else if id, ok := obj["id"].(string); ok {
+			conv.ResumeID = id
+		}
 		if title, ok := obj["title"].(string); ok {
 			conv.Title = title
 		}
@@ -165,6 +172,15 @@ func (p *codexProvider) parseFile(path string) (models.Conversation, error) {
 			}
 			var mobj map[string]interface{}
 			if err := json.Unmarshal(line, &mobj); err == nil {
+				if conv.ResumeID == "" {
+					if id, ok := mobj["sessionId"].(string); ok {
+						conv.ResumeID = id
+					} else if id, ok := mobj["session_id"].(string); ok {
+						conv.ResumeID = id
+					} else if id, ok := mobj["id"].(string); ok {
+						conv.ResumeID = id
+					}
+				}
 				if title, ok := mobj["title"].(string); ok && conv.Title == "" {
 					conv.Title = title
 				}
@@ -225,4 +241,37 @@ func (p *codexProvider) parseFile(path string) (models.Conversation, error) {
 	}
 
 	return conv, nil
+}
+
+func (p *codexProvider) ResumeSpec(
+	conv models.Conversation,
+	opts Options,
+	prompt []string,
+) (ResumeSpec, error) {
+	resumeID := conv.ResumeID
+	if resumeID == "" {
+		resumeID = strings.TrimSuffix(conv.ID, ".jsonl")
+		resumeID = strings.TrimSuffix(resumeID, ".json")
+	}
+
+	if strings.HasPrefix(resumeID, "rollout-") && len(resumeID) >= 36 {
+		resumeID = resumeID[len(resumeID)-36:]
+	}
+
+	args := []string{"resume"}
+	if resumeID != "" {
+		args = append(args, resumeID)
+	}
+	args = append(args, prompt...)
+
+	dir := conv.Cwd
+	if dir == "" {
+		dir = "" // Let execution use the current working directory
+	}
+
+	return ResumeSpec{
+		Command: "codex",
+		Args:    args,
+		Dir:     dir,
+	}, nil
 }

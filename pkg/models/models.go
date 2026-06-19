@@ -11,6 +11,7 @@ type Conversation struct {
 	Title     string
 	Snippet   string
 	Cwd       string
+	ResumeID  string
 	Messages  []Message
 	Raw       []byte `json:"-"`
 }
