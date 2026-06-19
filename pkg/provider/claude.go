@@ -177,6 +177,17 @@ func (p *claudeProvider) Dump(idOrFile string, opts Options) (models.Conversatio
 			return p.parseFile(target)
 		}
 	}
+	
+	// Fallback: search across all discovered conversations
+	convs, err := p.List(opts)
+	if err == nil {
+		for _, c := range convs {
+			if c.ID == idOrFile {
+				return p.parseFile(c.FilePath)
+			}
+		}
+	}
+
 	return models.Conversation{}, os.ErrNotExist
 }
 
@@ -208,29 +219,120 @@ func (p *claudeProvider) parseFile(path string) (models.Conversation, error) {
 		Raw:       data,
 	}
 
-	var obj map[string]interface{}
-	if err := json.Unmarshal(data, &obj); err == nil {
-		if title, ok := obj["title"].(string); ok {
-			conv.Title = title
-		}
-		if msgs, ok := obj["messages"].([]interface{}); ok {
-			for _, m := range msgs {
-				if mmap, ok := m.(map[string]interface{}); ok {
-					role, _ := mmap["role"].(string)
+	// Check if it's JSONL (multiple lines of JSON objects)
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) > 1 && strings.HasPrefix(lines[0], "{") && strings.HasPrefix(lines[1], "{") {
+		for _, line := range lines {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			var obj map[string]interface{}
+			if err := json.Unmarshal([]byte(line), &obj); err == nil {
+				// Extract ResumeID
+				if conv.ResumeID == "" {
+					if id, ok := obj["sessionId"].(string); ok {
+						conv.ResumeID = id
+					} else if id, ok := obj["session_id"].(string); ok {
+						conv.ResumeID = id
+					}
+				}
+
+				// Extract Cwd
+				if conv.Cwd == "" {
+					if cwd, ok := obj["cwd"].(string); ok {
+						conv.Cwd = cwd
+					}
+				}
+
+				// Try to extract title if available
+				if conv.Title == "" {
+					if t, ok := obj["aiTitle"].(string); ok {
+						conv.Title = t
+					} else if t, ok := obj["title"].(string); ok {
+						conv.Title = t
+					}
+				}
+
+				if msgObj, ok := obj["message"].(map[string]interface{}); ok {
+					role, _ := msgObj["role"].(string)
+					
+					// Handle content
 					var contentStr string
-					if content, ok := mmap["content"].(string); ok {
+					isThought := false
+					
+					if content, ok := msgObj["content"].(string); ok {
 						contentStr = content
-					} else if contentArr, ok := mmap["content"].([]interface{}); ok {
+					} else if contentArr, ok := msgObj["content"].([]interface{}); ok {
 						for _, cElem := range contentArr {
 							if cMap, ok := cElem.(map[string]interface{}); ok {
-								if t, ok := cMap["text"].(string); ok {
-									contentStr += t
+								if cType, _ := cMap["type"].(string); cType == "thinking" {
+									if t, ok := cMap["thinking"].(string); ok {
+										contentStr += t
+										isThought = true
+									}
+								} else if cType == "tool_use" {
+									if name, ok := cMap["name"].(string); ok {
+										contentStr += "[Tool Use: " + name + "]"
+									}
+								} else {
+									if t, ok := cMap["text"].(string); ok {
+										contentStr += t
+									}
 								}
 							}
 						}
 					}
 					if contentStr != "" {
-						conv.Messages = append(conv.Messages, models.Message{Role: role, Content: contentStr})
+						conv.Messages = append(conv.Messages, models.Message{Role: role, Content: contentStr, IsThought: isThought})
+					}
+				} else if typ, ok := obj["type"].(string); ok && typ == "system" {
+					if content, ok := obj["content"].(string); ok && content != "" {
+						conv.Messages = append(conv.Messages, models.Message{Role: "system", Content: content})
+					} else if contentMap, ok := obj["content"].(map[string]interface{}); ok {
+						if text, ok := contentMap["text"].(string); ok && text != "" {
+							conv.Messages = append(conv.Messages, models.Message{Role: "system", Content: text})
+						}
+					}
+				} else if typ == "attachment" {
+					if att, ok := obj["attachment"].(map[string]interface{}); ok {
+						if stdout, ok := att["stdout"].(string); ok && stdout != "" {
+							conv.Messages = append(conv.Messages, models.Message{Role: "tool", Content: stdout})
+						}
+					}
+				}
+			}
+		}
+	} else {
+		// Legacy single JSON format
+		var obj map[string]interface{}
+		if err := json.Unmarshal(data, &obj); err == nil {
+			if id, ok := obj["sessionId"].(string); ok {
+				conv.ResumeID = id
+			} else if id, ok := obj["session_id"].(string); ok {
+				conv.ResumeID = id
+			}
+			if title, ok := obj["title"].(string); ok {
+				conv.Title = title
+			}
+			if msgs, ok := obj["messages"].([]interface{}); ok {
+				for _, m := range msgs {
+					if mmap, ok := m.(map[string]interface{}); ok {
+						role, _ := mmap["role"].(string)
+						var contentStr string
+						if content, ok := mmap["content"].(string); ok {
+							contentStr = content
+						} else if contentArr, ok := mmap["content"].([]interface{}); ok {
+							for _, cElem := range contentArr {
+								if cMap, ok := cElem.(map[string]interface{}); ok {
+									if t, ok := cMap["text"].(string); ok {
+										contentStr += t
+									}
+								}
+							}
+						}
+						if contentStr != "" {
+							conv.Messages = append(conv.Messages, models.Message{Role: role, Content: contentStr})
+						}
 					}
 				}
 			}
@@ -238,4 +340,33 @@ func (p *claudeProvider) parseFile(path string) (models.Conversation, error) {
 	}
 
 	return conv, nil
+}
+
+func (p *claudeProvider) ResumeSpec(
+	conv models.Conversation,
+	opts Options,
+	prompt []string,
+) (ResumeSpec, error) {
+	resumeID := conv.ResumeID
+	if resumeID == "" {
+		resumeID = strings.TrimSuffix(conv.ID, ".jsonl")
+		resumeID = strings.TrimSuffix(resumeID, ".json")
+	}
+
+	args := []string{"--resume"}
+	if resumeID != "" {
+		args = append(args, resumeID)
+	}
+	args = append(args, prompt...)
+
+	dir := conv.Cwd
+	if dir == "" {
+		dir = "" // Let execution use the current working directory
+	}
+
+	return ResumeSpec{
+		Command: "claude",
+		Args:    args,
+		Dir:     dir,
+	}, nil
 }
