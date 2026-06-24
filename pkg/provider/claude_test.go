@@ -7,25 +7,27 @@ import (
 
 func TestExtractClaudeMeta(t *testing.T) {
 	tests := []struct {
-		name          string
-		filePath      string
-		expectTitle   string
-		expectSnippet string
-		expectCwd     string
+		name           string
+		filePath       string
+		expectTitle    string
+		expectSnippet  string
+		expectCwd      string
+		expectResumeID string
 	}{
 		{
-			name:          "JSONL with CWD",
-			filePath:      "../../testdata/claude/mock_jsonl.jsonl",
-			expectTitle:   "Test JSONL",
-			expectSnippet: "test message",
-			expectCwd:     "/my/correct/path",
+			name:           "JSONL with CWD",
+			filePath:       "../../testdata/claude/mock_jsonl.jsonl",
+			expectTitle:    "Test JSONL",
+			expectSnippet:  "test message",
+			expectCwd:      "/my/correct/path",
+			expectResumeID: "mock-session-uuid",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			absPath, _ := filepath.Abs(tc.filePath)
-			title, snippet, cwd := extractClaudeMeta(absPath)
+			title, snippet, cwd, resumeID := extractClaudeMeta(absPath)
 			
 			if title != tc.expectTitle {
 				t.Errorf("expected title %q, got %q", tc.expectTitle, title)
@@ -35,6 +37,9 @@ func TestExtractClaudeMeta(t *testing.T) {
 			}
 			if cwd != tc.expectCwd {
 				t.Errorf("expected cwd %q, got %q", tc.expectCwd, cwd)
+			}
+			if resumeID != tc.expectResumeID {
+				t.Errorf("expected resumeID %q, got %q", tc.expectResumeID, resumeID)
 			}
 		})
 	}

@@ -1,1 +1,1 @@
-{"aiTitle":"Test JSONL","message":{"role":"user","content":"test message"},"cwd":"/my/correct/path"}
+{"aiTitle":"Test JSONL","message":{"role":"user","content":"test message"},"cwd":"/my/correct/path","sessionId":"mock-session-uuid"}

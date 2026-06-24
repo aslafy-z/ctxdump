@@ -40,7 +40,7 @@ func (p *claudeProvider) List(opts Options) ([]models.Conversation, error) {
 			if name == "settings.json" || name == "settings.local.json" || name == "stats-cache.json" || name == "sessions-index.json" || name == "plugin.json" || name == ".mcp.json" {
 				return nil
 			}
-			title, snippet, cwd := extractClaudeMeta(path)
+			title, snippet, cwd, resumeID := extractClaudeMeta(path)
 			
 			// Fallback: if not found in file and looks like an encoded path
 			if cwd == "" && strings.Contains(path, ".claude/projects/") {
@@ -69,6 +69,7 @@ func (p *claudeProvider) List(opts Options) ([]models.Conversation, error) {
 					Title:     title,
 					Snippet:   snippet,
 					Cwd:       cwd,
+					ResumeID:  resumeID,
 					UpdatedAt: info.ModTime(),
 				})
 			}
@@ -81,10 +82,10 @@ func (p *claudeProvider) List(opts Options) ([]models.Conversation, error) {
 	return conversations, nil
 }
 
-func extractClaudeMeta(path string) (string, string, string) {
+func extractClaudeMeta(path string) (string, string, string, string) {
 	f, err := os.Open(path)
 	if err != nil {
-		return "", "", ""
+		return "", "", "", ""
 	}
 	defer f.Close()
 	scanner := bufio.NewScanner(f)
@@ -94,6 +95,7 @@ func extractClaudeMeta(path string) (string, string, string) {
 	var title string
 	var firstMessage string
 	var cwd string
+	var resumeID string
 
 	for i := 0; i < 200 && scanner.Scan(); i++ {
 		line := scanner.Text()
@@ -107,6 +109,9 @@ func extractClaudeMeta(path string) (string, string, string) {
 			needsParse = true
 		}
 		if firstMessage == "" && strings.Contains(line, `"role":"user"`) {
+			needsParse = true
+		}
+		if resumeID == "" && (strings.Contains(line, `"sessionId":`) || strings.Contains(line, `"session_id":`)) {
 			needsParse = true
 		}
 
@@ -124,6 +129,14 @@ func extractClaudeMeta(path string) (string, string, string) {
 				if cwd == "" {
 					if c, ok := obj["cwd"].(string); ok {
 						cwd = c
+					}
+				}
+
+				if resumeID == "" {
+					if id, ok := obj["sessionId"].(string); ok {
+						resumeID = id
+					} else if id, ok := obj["session_id"].(string); ok {
+						resumeID = id
 					}
 				}
 
@@ -163,7 +176,7 @@ func extractClaudeMeta(path string) (string, string, string) {
 		}
 	}
 	
-	return title, firstMessage, cwd
+	return title, firstMessage, cwd, resumeID
 }
 
 func (p *claudeProvider) Dump(idOrFile string, opts Options) (models.Conversation, error) {
@@ -182,7 +195,7 @@ func (p *claudeProvider) Dump(idOrFile string, opts Options) (models.Conversatio
 	convs, err := p.List(opts)
 	if err == nil {
 		for _, c := range convs {
-			if c.ID == idOrFile {
+			if c.ID == idOrFile || strings.TrimSuffix(c.ID, ".jsonl") == idOrFile || strings.TrimSuffix(c.ID, ".json") == idOrFile {
 				return p.parseFile(c.FilePath)
 			}
 		}

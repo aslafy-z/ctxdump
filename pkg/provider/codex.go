@@ -39,9 +39,11 @@ func (p *codexProvider) List(opts Options) ([]models.Conversation, error) {
 				title := ""
 				snippet := ""
 				cwd := ""
+				resumeID := ""
 				if c, err := p.parseFile(path); err == nil {
 					title = c.Title
 					cwd = c.Cwd
+					resumeID = c.ResumeID
 					for _, m := range c.Messages {
 						content := strings.TrimSpace(m.Content)
 						if m.Role == "user" {
@@ -74,6 +76,7 @@ func (p *codexProvider) List(opts Options) ([]models.Conversation, error) {
 					Title:     title,
 					Snippet:   snippet,
 					Cwd:       cwd,
+					ResumeID:  resumeID,
 					UpdatedAt: info.ModTime(),
 				})
 			}

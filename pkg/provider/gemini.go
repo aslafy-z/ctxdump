@@ -36,8 +36,10 @@ func (p *geminiProvider) List(opts Options) ([]models.Conversation, error) {
 				}
 				title := ""
 				snippet := ""
+				resumeID := ""
 				if c, err := p.parseFile(path); err == nil {
 					title = c.Title
+					resumeID = c.ResumeID
 					for _, m := range c.Messages {
 						if m.Role == "user" && m.Content != "" {
 							snippet = m.Content
@@ -72,6 +74,7 @@ func (p *geminiProvider) List(opts Options) ([]models.Conversation, error) {
 					FilePath:  path,
 					Title:     title,
 					Snippet:   snippet,
+					ResumeID:  resumeID,
 					UpdatedAt: info.ModTime(),
 				})
 			}
