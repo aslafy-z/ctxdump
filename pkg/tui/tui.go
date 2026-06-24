@@ -44,7 +44,18 @@ func (i item) Description() string {
 	}
 	return fmt.Sprintf("[%s] %s - %s", i.conv.Provider, formatter.HumanizeTime(i.conv.UpdatedAt), path)
 }
-func (i item) FilterValue() string { return i.conv.Title + " " + i.conv.Provider + " " + i.conv.Snippet }
+func (i item) FilterValue() string { 
+	if i.conv.SearchContent != "" {
+		return i.conv.Title + " " + i.conv.Provider + " " + i.conv.Snippet + " " + i.conv.SearchContent
+	}
+	return i.conv.Title + " " + i.conv.Provider + " " + i.conv.Snippet 
+}
+
+type startLoadingMsg struct{}
+
+type allContentLoadedMsg struct {
+	contents map[string]string
+}
 
 type model struct {
 	list          list.Model
@@ -58,22 +69,88 @@ type model struct {
 	selected      *models.Conversation
 	copyFormat    string
 	formats       []string
+	sortBy        string
+	sortOrder     string
 }
 
 func (m model) Init() tea.Cmd {
+	var cmds []tea.Cmd
 	if m.startInFilter {
-		return func() tea.Msg {
+		cmds = append(cmds, func() tea.Msg {
 			return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}}
-		}
+		})
 	}
-	return nil
+	cmds = append(cmds, func() tea.Msg {
+		return startLoadingMsg{}
+	})
+	return tea.Batch(cmds...)
+}
+
+func loadAllContentCmd(registry *provider.Registry, opts provider.Options, convs []models.Conversation) tea.Cmd {
+	return func() tea.Msg {
+		contents := make(map[string]string)
+		for _, conv := range convs {
+			p, err := registry.Get(conv.Provider)
+			if err != nil {
+				continue
+			}
+			fullConv, err := p.Dump(conv.FilePath, opts)
+			if err != nil {
+				continue
+			}
+			var contentBuilder strings.Builder
+			for _, msg := range fullConv.Messages {
+				contentBuilder.WriteString(msg.Content)
+				contentBuilder.WriteString(" ")
+			}
+			key := conv.Provider + "/" + conv.ID
+			contents[key] = contentBuilder.String()
+		}
+		return allContentLoadedMsg{contents: contents}
+	}
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case startLoadingMsg:
+		if len(m.conversations) > 0 {
+			// Copy conversations so we don't hold references to the UI model's slice
+			convs := make([]models.Conversation, len(m.conversations))
+			copy(convs, m.conversations)
+			return m, loadAllContentCmd(m.registry, m.opts, convs)
+		}
+
+	case allContentLoadedMsg:
+		items := m.list.Items()
+		newItems := make([]list.Item, len(items))
+		for i, itm := range items {
+			typedItm := itm.(item)
+			key := typedItm.conv.Provider + "/" + typedItm.conv.ID
+			if content, ok := msg.contents[key]; ok {
+				typedItm.conv.SearchContent = content
+			}
+			newItems[i] = typedItm
+		}
+		for i, conv := range m.conversations {
+			key := conv.Provider + "/" + conv.ID
+			if content, ok := msg.contents[key]; ok {
+				m.conversations[i].SearchContent = content
+			}
+		}
+		cmd := m.list.SetItems(newItems)
+		return m, cmd
+
 	case tea.KeyMsg:
+		if msg.String() == "ctrl+c" {
+			return m, tea.Quit
+		}
+
+		if m.list.FilterState() == list.Filtering {
+			break
+		}
+
 		switch msg.String() {
-		case "ctrl+c", "q":
+		case "q":
 			return m, tea.Quit
 
 		case "d", "delete", "x", "backspace":
@@ -131,9 +208,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				nextIdx := (idx + 1) % len(m.formats)
 				m.copyFormat = m.formats[nextIdx]
-				m.list.Title = fmt.Sprintf("Select a conversation to copy (Output: %s)", m.copyFormat)
+				m.updateTitle()
 				return m, nil
 			}
+
+		case "s":
+			switch m.sortBy {
+			case "date":
+				m.sortBy = "path"
+			case "path":
+				m.sortBy = "score"
+			case "score", "cwd":
+				m.sortBy = "date"
+			default:
+				m.sortBy = "date"
+			}
+			cmd := m.applySorting()
+			m.updateTitle()
+			return m, tea.Batch(cmd, m.list.NewStatusMessage(fmt.Sprintf("Sorted by %s (%s)", m.sortBy, m.sortOrder)))
+
+		case "S":
+			if m.sortOrder == "asc" {
+				m.sortOrder = "desc"
+			} else {
+				m.sortOrder = "asc"
+			}
+			cmd := m.applySorting()
+			m.updateTitle()
+			return m, tea.Batch(cmd, m.list.NewStatusMessage(fmt.Sprintf("Sorted by %s (%s)", m.sortBy, m.sortOrder)))
 		}
 	case tea.WindowSizeMsg:
 		h, v := docStyle.GetFrameSize()
@@ -155,7 +257,7 @@ func (m model) View() string {
 
 // Run starts the Bubble Tea UI for searching and copying/resuming conversations.
 // action can be "copy" or "resume". It returns the selected conversation if action is "resume".
-func Run(conversations []models.Conversation, initialQuery string, startInFilter bool, opts provider.Options, reg *provider.Registry, action string, initialCopyFormat string) (*models.Conversation, error) {
+func Run(conversations []models.Conversation, initialQuery string, startInFilter bool, opts provider.Options, reg *provider.Registry, action string, initialCopyFormat string, sortBy string, sortOrder string) (*models.Conversation, error) {
 	items := make([]list.Item, len(conversations))
 	for i, c := range conversations {
 		items[i] = item{conv: c}
@@ -185,35 +287,48 @@ func Run(conversations []models.Conversation, initialQuery string, startInFilter
 		action:        action,
 		copyFormat:    copyFormat,
 		formats:       validFormats,
+		sortBy:        sortBy,
+		sortOrder:     sortOrder,
 	}
-	if action == "resume" {
-		m.list.Title = "Select a conversation to resume"
-	} else {
-		m.list.Title = fmt.Sprintf("Select a conversation to copy (Output: %s)", m.copyFormat)
-	}
+
+	// We use a custom filter function to clean targets of null bytes (to avoid sahilm/fuzzy panic),
+	// strip MatchedIndexes (to prevent DefaultDelegate out-of-bounds highlighting panic),
+	// and preserve the custom sort order when filtering.
+	m.list.Filter = m.getFilterFunc()
+
+	m.updateTitle()
+
 	m.list.AdditionalShortHelpKeys = func() []key.Binding {
 		if action == "resume" {
 			return []key.Binding{
 				key.NewBinding(key.WithKeys("c", "enter"), key.WithHelp("c/enter", "resume")),
+				key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "sort")),
+				key.NewBinding(key.WithKeys("S"), key.WithHelp("S", "order")),
 				key.NewBinding(key.WithKeys("d", "delete"), key.WithHelp("d/del", "hide")),
 			}
 		}
 		return []key.Binding{
 			key.NewBinding(key.WithKeys("c", "enter"), key.WithHelp("c/enter", "copy")),
 			key.NewBinding(key.WithKeys("o", "f"), key.WithHelp("o/f", "output")),
+			key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "sort")),
+			key.NewBinding(key.WithKeys("S"), key.WithHelp("S", "order")),
 			key.NewBinding(key.WithKeys("d", "delete"), key.WithHelp("d/del", "hide")),
 		}
 	}
 	m.list.AdditionalFullHelpKeys = func() []key.Binding {
 		if action == "resume" {
 			return []key.Binding{
-			key.NewBinding(key.WithKeys("c", "enter"), key.WithHelp("c/enter", "resume")),
+				key.NewBinding(key.WithKeys("c", "enter"), key.WithHelp("c/enter", "resume")),
+				key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "sort field")),
+				key.NewBinding(key.WithKeys("S"), key.WithHelp("S", "sort order")),
 				key.NewBinding(key.WithKeys("d", "delete"), key.WithHelp("d/delete", "hide")),
 			}
 		}
 		return []key.Binding{
 			key.NewBinding(key.WithKeys("c", "enter"), key.WithHelp("c/enter", "copy")),
 			key.NewBinding(key.WithKeys("o", "f"), key.WithHelp("o/f", "cycle output")),
+			key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "sort field")),
+			key.NewBinding(key.WithKeys("S"), key.WithHelp("S", "sort order")),
 			key.NewBinding(key.WithKeys("d", "delete"), key.WithHelp("d/delete", "hide")),
 		}
 	}
@@ -240,4 +355,92 @@ func Run(conversations []models.Conversation, initialQuery string, startInFilter
 		return fm.selected, nil
 	}
 	return nil, nil
+}
+
+func (m *model) applySorting() tea.Cmd {
+	var sf models.SortField
+	switch m.sortBy {
+	case "date":
+		sf = models.SortFieldDate
+	case "path":
+		sf = models.SortFieldPath
+	case "score", "cwd":
+		sf = models.SortFieldScore
+	default:
+		sf = models.SortFieldDate
+	}
+
+	var so models.SortOrder
+	if m.sortOrder == "asc" {
+		so = models.SortOrderAsc
+	} else {
+		so = models.SortOrderDesc
+	}
+
+	models.SortConversations(m.conversations, sf, so)
+
+	items := make([]list.Item, len(m.conversations))
+	for i, c := range m.conversations {
+		items[i] = item{conv: c}
+	}
+	m.list.Filter = m.getFilterFunc()
+	cmd := m.list.SetItems(items)
+	m.list.Select(0)
+	return cmd
+}
+
+func (m *model) updateTitle() {
+	var sortStr string
+	switch m.sortBy {
+	case "date":
+		sortStr = "Date"
+	case "path":
+		sortStr = "Path"
+	case "score", "cwd":
+		sortStr = "Score"
+	default:
+		sortStr = m.sortBy
+	}
+
+	orderStr := "Desc"
+	if m.sortOrder == "asc" {
+		orderStr = "Asc"
+	}
+
+	if m.action == "resume" {
+		m.list.Title = fmt.Sprintf("Select a conversation to resume [Sort: %s %s]", sortStr, orderStr)
+	} else {
+		m.list.Title = fmt.Sprintf("Select a conversation to copy (Output: %s) [Sort: %s %s]", m.copyFormat, sortStr, orderStr)
+	}
+}
+
+func (m model) getFilterFunc() list.FilterFunc {
+	return func(term string, targets []string) []list.Rank {
+		if term == "" {
+			ranks := make([]list.Rank, len(targets))
+			for i := range targets {
+				ranks[i] = list.Rank{Index: i}
+			}
+			return ranks
+		}
+
+		words := strings.Fields(strings.ToLower(term))
+		var ranks []list.Rank
+		for i, t := range targets {
+			tLower := strings.ToLower(strings.ReplaceAll(t, "\x00", ""))
+			matches := true
+			for _, w := range words {
+				if !strings.Contains(tLower, w) {
+					matches = false
+					break
+				}
+			}
+			if matches {
+				ranks = append(ranks, list.Rank{
+					Index: i,
+				})
+			}
+		}
+		return ranks
+	}
 }

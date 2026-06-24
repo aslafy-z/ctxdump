@@ -6,11 +6,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"sort"
 	"strings"
 	"text/tabwriter"
-	"time"
 
 	"github.com/charmbracelet/x/term"
 	"github.com/urfave/cli/v3"
@@ -36,23 +33,15 @@ GLOBAL OPTIONS:{{range .Flags}}
    {{.}}{{end}}
 
 COMMANDS:{{range .Commands}}
-   {{join .Names ", "}}{{"\t"}}{{.Usage}}{{if .Flags}}
-     Flags:{{range .Flags}}
-       {{.}}{{end}}{{end}}
+   {{join .Names ", "}}{{"\t"}}{{.Usage}}
 {{end}}
 `,
-		Flags: []cli.Flag{
-			&cli.StringFlag{Name: "provider", Usage: "Filter by provider (codex, claude, gemini, antigravity)"},
-			&cli.StringFlag{Name: "path", Usage: "Custom path to search for conversations"},
-			&cli.StringFlag{Name: "sort", Value: "cwd", Usage: "Sort mode: cwd, date"},
-			&cli.StringFlag{Name: "output", Aliases: []string{"o"}, Value: "table", Usage: "Output format: table, json, jsonl, markdown, raw, plain, agent"},
-			&cli.BoolFlag{Name: "interactive", Aliases: []string{"i"}, Usage: "Force interactive TUI mode"},
-			&cli.BoolFlag{Name: "non-interactive", Aliases: []string{"n"}, Usage: "Disable interactive TUI mode"},
-		},
+		Flags: getCommonFlags(false),
 		Commands: []*cli.Command{
 			{
 				Name:  "list",
 				Usage: "Discover and list conversations",
+				Flags: getCommonFlags(true),
 				Action: func(ctx context.Context, cmd *cli.Command) error {
 					opts := provider.Options{CustomPath: cmd.String("path")}
 					providers, err := getProviders(cmd.String("provider"))
@@ -60,7 +49,7 @@ COMMANDS:{{range .Commands}}
 						return err
 					}
 
-					convs := loadAndSortConversations(providers, opts, cmd.String("sort"))
+					convs := loadAndSortConversations(providers, opts, cmd.String("sort"), cmd.String("order"))
 
 					useTUI := isTTY()
 					if cmd.Bool("interactive") {
@@ -71,7 +60,7 @@ COMMANDS:{{range .Commands}}
 					}
 
 					if useTUI {
-						_, err := tui.Run(convs, "", false, opts, reg, "copy", cmd.String("output"))
+						_, err := tui.Run(convs, "", false, opts, reg, "copy", cmd.String("output"), cmd.String("sort"), cmd.String("order"))
 						return err
 					}
 
@@ -82,6 +71,7 @@ COMMANDS:{{range .Commands}}
 			{
 				Name:  "search",
 				Usage: "Search conversations",
+				Flags: getCommonFlags(true),
 				Action: func(ctx context.Context, cmd *cli.Command) error {
 					query := cmd.Args().First()
 					interactive := cmd.Bool("interactive")
@@ -131,10 +121,10 @@ COMMANDS:{{range .Commands}}
 						}
 					}
 
-					sortConversations(matches, cmd.String("sort"))
+					models.SortConversations(matches, getSortField(cmd.String("sort")), getSortOrder(cmd.String("order")))
 
 					if interactive {
-						_, err := tui.Run(matches, query, true, opts, reg, "copy", cmd.String("output"))
+						_, err := tui.Run(matches, query, false, opts, reg, "copy", cmd.String("output"), cmd.String("sort"), cmd.String("order"))
 						return err
 					}
 
@@ -145,13 +135,13 @@ COMMANDS:{{range .Commands}}
 			{
 				Name:  "dump",
 				Usage: "Dump a specific conversation by ID or file path",
-				Flags: []cli.Flag{
+				Flags: append(getCommonFlags(true),
 					&cli.IntFlag{Name: "max-tool-output", Value: 8000, Usage: "Max tool output bytes"},
 					&cli.IntFlag{Name: "max-message-bytes", Value: 50000, Usage: "Max message bytes"},
 					&cli.BoolFlag{Name: "full", Usage: "Do not truncate output"},
 					&cli.BoolFlag{Name: "timestamps", Usage: "Include timestamps in agent output"},
 					&cli.BoolFlag{Name: "include-thoughts", Usage: "Include thinking/commentary messages"},
-				},
+				),
 				Action: func(ctx context.Context, cmd *cli.Command) error {
 					idOrFile := cmd.Args().First()
 					if idOrFile == "" {
@@ -190,10 +180,10 @@ COMMANDS:{{range .Commands}}
 			{
 				Name:  "resume",
 				Usage: "Resume a conversation in its provider's native editor",
-				Flags: []cli.Flag{
+				Flags: append(getCommonFlags(true),
 					&cli.StringFlag{Name: "exec", Usage: "Custom execution template (e.g. 'editor {}' or 'editor {path}')"},
 					&cli.BoolFlag{Name: "print-cmd", Usage: "Print the resolved command without executing it"},
-				},
+				),
 				Action: func(ctx context.Context, cmd *cli.Command) error {
 					var providerName string
 					var idOrFile string
@@ -233,7 +223,7 @@ COMMANDS:{{range .Commands}}
 							return err
 						}
 
-						convs := loadAndSortConversations(providers, opts, cmd.String("sort"))
+						convs := loadAndSortConversations(providers, opts, cmd.String("sort"), cmd.String("order"))
 						if len(convs) == 0 {
 							if providerName != "" {
 								return fmt.Errorf("no conversations found for provider %q", providerName)
@@ -242,7 +232,7 @@ COMMANDS:{{range .Commands}}
 						}
 
 						if isTTY() && !cmd.Bool("non-interactive") {
-							sel, err := tui.Run(convs, "", false, opts, reg, "resume", "")
+							sel, err := tui.Run(convs, "", false, opts, reg, "resume", "", cmd.String("sort"), cmd.String("order"))
 							if err != nil {
 								return fmt.Errorf("error running TUI: %w", err)
 							}
@@ -260,6 +250,11 @@ COMMANDS:{{range .Commands}}
 					var execCmd *exec.Cmd
 
 					if rp, ok := p.(provider.Resumer); ok && cmd.String("exec") == "" {
+						if selected.ResumeID == "" && selected.FilePath != "" {
+							if full, err := p.Dump(selected.FilePath, opts); err == nil {
+								selected = full
+							}
+						}
 						spec, err := rp.ResumeSpec(selected, opts, promptArgs)
 						if err != nil {
 							return err
@@ -326,8 +321,8 @@ COMMANDS:{{range .Commands}}
 				if err != nil {
 					return err
 				}
-				convs := loadAndSortConversations(providers, opts, "cwd")
-				_, err = tui.Run(convs, "", false, opts, reg, "copy", "table")
+				convs := loadAndSortConversations(providers, opts, cmd.String("sort"), cmd.String("order"))
+				_, err = tui.Run(convs, "", false, opts, reg, "copy", "table", cmd.String("sort"), cmd.String("order"))
 				return err
 			}
 			return cli.ShowAppHelp(cmd)
@@ -371,24 +366,30 @@ func loadConversations(providers []provider.Provider, opts provider.Options) []m
 	return allConversations
 }
 
-func loadAndSortConversations(providers []provider.Provider, opts provider.Options, sortMode string) []models.Conversation {
+func loadAndSortConversations(providers []provider.Provider, opts provider.Options, sortMode string, sortOrder string) []models.Conversation {
 	convs := loadConversations(providers, opts)
-	sortConversations(convs, sortMode)
+	models.SortConversations(convs, getSortField(sortMode), getSortOrder(sortOrder))
 	return convs
 }
 
-func sortConversations(convs []models.Conversation, sortMode string) {
-	currentCwd, _ := os.Getwd()
-	sort.Slice(convs, func(i, j int) bool {
-		if sortMode == "cwd" {
-			scoreI := computeSortScore(convs[i], currentCwd)
-			scoreJ := computeSortScore(convs[j], currentCwd)
-			if scoreI != scoreJ {
-				return scoreI > scoreJ
-			}
-		}
-		return convs[i].UpdatedAt.After(convs[j].UpdatedAt)
-	})
+func getSortField(sortFlag string) models.SortField {
+	switch strings.ToLower(sortFlag) {
+	case "date", "time", "updated":
+		return models.SortFieldDate
+	case "path", "filepath":
+		return models.SortFieldPath
+	case "score", "cwd":
+		return models.SortFieldScore
+	default:
+		return models.SortFieldScore // default fallback
+	}
+}
+
+func getSortOrder(orderFlag string) models.SortOrder {
+	if strings.ToLower(orderFlag) == "asc" {
+		return models.SortOrderAsc
+	}
+	return models.SortOrderDesc
 }
 
 func findAndDumpConversation(providers []provider.Provider, idOrFile string, opts provider.Options) (models.Conversation, error) {
@@ -398,44 +399,6 @@ func findAndDumpConversation(providers []provider.Provider, idOrFile string, opt
 		}
 	}
 	return models.Conversation{}, fmt.Errorf("conversation %q not found", idOrFile)
-}
-
-func cwdScore(current, target string) int {
-	if target == "" {
-		return -1
-	}
-	current = filepath.Clean(current)
-	target = filepath.Clean(target)
-
-	if current == target {
-		return 10000
-	}
-
-	currParts := strings.Split(current, string(filepath.Separator))
-	targParts := strings.Split(target, string(filepath.Separator))
-
-	commonLen := 0
-	for i := 0; i < len(currParts) && i < len(targParts); i++ {
-		if currParts[i] == targParts[i] {
-			commonLen += len(currParts[i]) + 1
-		} else {
-			break
-		}
-	}
-
-	return (commonLen * 100) - len(target)
-}
-
-func computeSortScore(c models.Conversation, currentCwd string) float64 {
-	prox := float64(cwdScore(currentCwd, c.Cwd))
-	if prox < 0 {
-		prox = 0
-	}
-
-	bonusDays := prox / 2000.0
-	actualAgeDays := time.Since(c.UpdatedAt).Hours() / 24.0
-
-	return bonusDays - actualAgeDays
 }
 
 func printConversations(convs []models.Conversation, format string) {
@@ -503,4 +466,16 @@ func printConversations(convs []models.Conversation, format string) {
 		fmt.Fprintf(w, "%s\t%s\t%s\n", idStr, title, timeStr)
 	}
 	w.Flush()
+}
+
+func getCommonFlags(hidden bool) []cli.Flag {
+	return []cli.Flag{
+		&cli.StringFlag{Name: "provider", Usage: "Filter by provider (codex, claude, gemini, antigravity)", Hidden: hidden},
+		&cli.StringFlag{Name: "path", Usage: "Custom path to search for conversations", Hidden: hidden},
+		&cli.StringFlag{Name: "sort", Value: "cwd", Usage: "Sort key: date, path, score, cwd", Hidden: hidden},
+		&cli.StringFlag{Name: "order", Value: "desc", Usage: "Sort order: asc, desc", Hidden: hidden},
+		&cli.StringFlag{Name: "output", Aliases: []string{"o"}, Value: "table", Usage: "Output format: table, json, jsonl, markdown, raw, plain, agent", Hidden: hidden},
+		&cli.BoolFlag{Name: "interactive", Aliases: []string{"i"}, Usage: "Force interactive TUI mode", Hidden: hidden},
+		&cli.BoolFlag{Name: "non-interactive", Aliases: []string{"n"}, Usage: "Disable interactive TUI mode", Hidden: hidden},
+	}
 }
