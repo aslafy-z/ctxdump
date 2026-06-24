@@ -78,6 +78,9 @@ func formatAgent(conv models.Conversation, opts Options) (string, error) {
 	sb.WriteString(fmt.Sprintf("format: agent-handoff-v1\n"))
 	sb.WriteString(fmt.Sprintf("source: %s\n", conv.Provider))
 	sb.WriteString(fmt.Sprintf("session_id: %s\n", conv.ID))
+	if conv.FilePath != "" {
+		sb.WriteString(fmt.Sprintf("session_log: %s\n", conv.FilePath))
+	}
 	if conv.Cwd != "" {
 		sb.WriteString(fmt.Sprintf("workspace: %s\n", conv.Cwd))
 	}
