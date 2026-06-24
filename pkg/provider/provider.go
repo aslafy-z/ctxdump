@@ -1,10 +1,28 @@
 package provider
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/user/ctxdump/pkg/models"
 )
+
+// UnifiedDiff renders a before/after pair as a unified diff for the given file,
+// so edits are presented consistently across providers.
+func UnifiedDiff(file, oldStr, newStr string) string {
+	var sb strings.Builder
+	if file != "" {
+		fmt.Fprintf(&sb, "--- %s\n+++ %s\n", file, file)
+	}
+	sb.WriteString("@@ @@\n")
+	for _, line := range strings.Split(oldStr, "\n") {
+		sb.WriteString("-" + line + "\n")
+	}
+	for _, line := range strings.Split(newStr, "\n") {
+		sb.WriteString("+" + line + "\n")
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
 
 // Options holds common configuration for providers.
 type Options struct {

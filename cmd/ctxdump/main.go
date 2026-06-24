@@ -191,12 +191,12 @@ COMMANDS:{{range .Commands}}
 
 					if cmd.Args().Len() > 0 {
 						// Check if first arg is a known provider
-					if p, err := reg.Get(cmd.Args().Get(0)); err == nil {
-						providerName = p.Name()
-						if cmd.Args().Len() > 1 {
-							idOrFile = cmd.Args().Get(1)
-							promptArgs = cmd.Args().Slice()[2:]
-						}
+						if p, err := reg.Get(cmd.Args().Get(0)); err == nil {
+							providerName = p.Name()
+							if cmd.Args().Len() > 1 {
+								idOrFile = cmd.Args().Get(1)
+								promptArgs = cmd.Args().Slice()[2:]
+							}
 						} else {
 							idOrFile = cmd.Args().Get(0)
 							promptArgs = cmd.Args().Slice()[1:]
@@ -259,7 +259,7 @@ COMMANDS:{{range .Commands}}
 						if err != nil {
 							return err
 						}
-						
+
 						if cmd.Bool("print-cmd") {
 							cmdStr := ""
 							if spec.Dir != "" {
@@ -393,12 +393,38 @@ func getSortOrder(orderFlag string) models.SortOrder {
 }
 
 func findAndDumpConversation(providers []provider.Provider, idOrFile string, opts provider.Options) (models.Conversation, error) {
+	// Every provider's Dump succeeds on any readable path, so when the argument is
+	// a file path we route by its location to avoid the wrong provider claiming it.
+	if detected := detectProviderFromPath(providers, idOrFile); detected != nil {
+		if conv, err := detected.Dump(idOrFile, opts); err == nil {
+			return conv, nil
+		}
+	}
 	for _, p := range providers {
 		if conv, err := p.Dump(idOrFile, opts); err == nil {
 			return conv, nil
 		}
 	}
 	return models.Conversation{}, fmt.Errorf("conversation %q not found", idOrFile)
+}
+
+// detectProviderFromPath matches a conversation file path against each provider's
+// well-known storage layout and returns the owning provider, or nil if unknown.
+func detectProviderFromPath(providers []provider.Provider, path string) provider.Provider {
+	markers := map[string][]string{
+		"claude":      {"/.claude/projects/", "/.claude/tasks/"},
+		"codex":       {"/.codex/sessions/"},
+		"antigravity": {"/.gemini/antigravity-ide/", "/.gemini/antigravity/"},
+		"gemini":      {"/.gemini/tmp/"},
+	}
+	for _, p := range providers {
+		for _, marker := range markers[p.Name()] {
+			if strings.Contains(path, marker) {
+				return p
+			}
+		}
+	}
+	return nil
 }
 
 func printConversations(convs []models.Conversation, format string) {
@@ -425,7 +451,7 @@ func printConversations(convs []models.Conversation, format string) {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	
+
 	termWidth := 80
 	if isTTY() {
 		if wt, _, err := term.GetSize(os.Stdout.Fd()); err == nil && wt > 0 {
@@ -452,17 +478,17 @@ func printConversations(convs []models.Conversation, format string) {
 			title = "No title"
 		}
 		title = strings.ReplaceAll(title, "\n", " ")
-		
+
 		timeStr := formatter.HumanizeTime(c.UpdatedAt)
 		idStr := c.Provider + "/" + c.ID
-		
-		consumed := maxTimeLen + maxIdLen + 4 
+
+		consumed := maxTimeLen + maxIdLen + 4
 		maxTitle := termWidth - consumed
-		
+
 		if maxTitle > 10 && len(title) > maxTitle {
 			title = title[:maxTitle-3] + "..."
 		}
-		
+
 		fmt.Fprintf(w, "%s\t%s\t%s\n", idStr, title, timeStr)
 	}
 	w.Flush()

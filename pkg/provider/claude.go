@@ -3,6 +3,7 @@ package provider
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -41,7 +42,7 @@ func (p *claudeProvider) List(opts Options) ([]models.Conversation, error) {
 				return nil
 			}
 			title, snippet, cwd, resumeID := extractClaudeMeta(path)
-			
+
 			// Fallback: if not found in file and looks like an encoded path
 			if cwd == "" && strings.Contains(path, ".claude/projects/") {
 				dir := filepath.Dir(path)
@@ -99,7 +100,7 @@ func extractClaudeMeta(path string) (string, string, string, string) {
 
 	for i := 0; i < 200 && scanner.Scan(); i++ {
 		line := scanner.Text()
-		
+
 		// Fast-path json parsing for lines containing known keys to avoid unmarshaling everything
 		needsParse := false
 		if title == "" && strings.Contains(line, `"aiTitle":`) {
@@ -125,7 +126,7 @@ func extractClaudeMeta(path string) (string, string, string, string) {
 						title = t
 					}
 				}
-				
+
 				if cwd == "" {
 					if c, ok := obj["cwd"].(string); ok {
 						cwd = c
@@ -159,7 +160,7 @@ func extractClaudeMeta(path string) (string, string, string, string) {
 			}
 		}
 	}
-	
+
 	if firstMessage != "" {
 		if strings.HasPrefix(firstMessage, "<local-command-caveat>") {
 			endIdx := strings.Index(firstMessage, "</local-command-caveat>")
@@ -169,13 +170,13 @@ func extractClaudeMeta(path string) (string, string, string, string) {
 				firstMessage = ""
 			}
 		}
-		
+
 		firstMessage = strings.ReplaceAll(firstMessage, "\n", " ")
 		if len(firstMessage) > 100 {
 			firstMessage = firstMessage[:97] + "..."
 		}
 	}
-	
+
 	return title, firstMessage, cwd, resumeID
 }
 
@@ -190,7 +191,7 @@ func (p *claudeProvider) Dump(idOrFile string, opts Options) (models.Conversatio
 			return p.parseFile(target)
 		}
 	}
-	
+
 	// Fallback: search across all discovered conversations
 	convs, err := p.List(opts)
 	if err == nil {
@@ -268,11 +269,11 @@ func (p *claudeProvider) parseFile(path string) (models.Conversation, error) {
 
 				if msgObj, ok := obj["message"].(map[string]interface{}); ok {
 					role, _ := msgObj["role"].(string)
-					
+
 					// Handle content
 					var contentStr string
 					isThought := false
-					
+
 					if content, ok := msgObj["content"].(string); ok {
 						contentStr = content
 					} else if contentArr, ok := msgObj["content"].([]interface{}); ok {
@@ -284,9 +285,9 @@ func (p *claudeProvider) parseFile(path string) (models.Conversation, error) {
 										isThought = true
 									}
 								} else if cType == "tool_use" {
-									if name, ok := cMap["name"].(string); ok {
-										contentStr += "[Tool Use: " + name + "]"
-									}
+									contentStr += renderToolUse(cMap)
+								} else if cType == "tool_result" {
+									contentStr += renderToolResult(cMap)
 								} else {
 									if t, ok := cMap["text"].(string); ok {
 										contentStr += t
@@ -353,6 +354,67 @@ func (p *claudeProvider) parseFile(path string) (models.Conversation, error) {
 	}
 
 	return conv, nil
+}
+
+// renderToolUse turns a tool_use content block into a readable representation,
+// preserving the meaningful input (command, file content, edit diff) instead of
+// collapsing it to the tool name.
+func renderToolUse(block map[string]interface{}) string {
+	name, _ := block["name"].(string)
+	input, _ := block["input"].(map[string]interface{})
+
+	if input == nil {
+		return fmt.Sprintf("[Tool Use: %s]", name)
+	}
+
+	str := func(key string) string {
+		s, _ := input[key].(string)
+		return s
+	}
+
+	switch name {
+	case "Bash":
+		var sb strings.Builder
+		sb.WriteString("[Tool Use: Bash]\n")
+		if desc := str("description"); desc != "" {
+			sb.WriteString("# " + desc + "\n")
+		}
+		sb.WriteString("$ " + str("command"))
+		return sb.String()
+	case "Write":
+		return fmt.Sprintf("[Tool Use: Write %s]\n%s", str("file_path"), str("content"))
+	case "Edit":
+		return fmt.Sprintf("[Tool Use: Edit %s]\n%s",
+			str("file_path"), UnifiedDiff(str("file_path"), str("old_string"), str("new_string")))
+	case "Read":
+		return fmt.Sprintf("[Tool Use: Read %s]", str("file_path"))
+	default:
+		if b, err := json.Marshal(input); err == nil {
+			return fmt.Sprintf("[Tool Use: %s] %s", name, string(b))
+		}
+		return fmt.Sprintf("[Tool Use: %s]", name)
+	}
+}
+
+// renderToolResult extracts the textual output of a tool_result content block,
+// whose content may be a plain string or an array of text blocks.
+func renderToolResult(block map[string]interface{}) string {
+	switch c := block["content"].(type) {
+	case string:
+		return c
+	case []interface{}:
+		var sb strings.Builder
+		for _, elem := range c {
+			if m, ok := elem.(map[string]interface{}); ok {
+				if t, ok := m["text"].(string); ok {
+					sb.WriteString(t)
+				}
+			}
+		}
+		return sb.String()
+	default:
+		return ""
+	}
 }
 
 func (p *claudeProvider) ResumeSpec(
