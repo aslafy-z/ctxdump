@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -56,7 +57,7 @@ func (p *codexProvider) List(opts Options) ([]models.Conversation, error) {
 					if snippet == "" && len(c.Messages) > 0 {
 						snippet = c.Messages[0].Content
 					}
-					
+
 					snippet = strings.ReplaceAll(snippet, "\n", " ")
 					if len(snippet) > 100 {
 						snippet = snippet[:97] + "..."
@@ -157,7 +158,7 @@ func (p *codexProvider) parseFile(path string) (models.Conversation, error) {
 						if start != -1 && end != -1 && start+5 < end {
 							conv.Cwd = content[start+5 : end]
 						}
-						
+
 						content = StripSystemTags(content)
 						if content != "" {
 							conv.Messages = append(conv.Messages, models.Message{Role: role, Content: content})
@@ -194,8 +195,16 @@ func (p *codexProvider) parseFile(path string) (models.Conversation, error) {
 				if payload, ok := mobj["payload"].(map[string]interface{}); ok {
 					if r, ok := payload["role"].(string); ok {
 						role = r
-					} 
-					
+					}
+
+					// Tool activity (commands, patches, MCP calls) lives in dedicated
+					// payload types that carry no "content"/"message" field. Render them
+					// explicitly so the work performed is visible in the transcript.
+					if tool := renderCodexTool(payload); tool != "" {
+						conv.Messages = append(conv.Messages, models.Message{Role: "tool", Content: tool})
+						continue
+					}
+
 					if t, ok := payload["type"].(string); ok {
 						if t == "user_message" {
 							role = "user"
@@ -233,7 +242,7 @@ func (p *codexProvider) parseFile(path string) (models.Conversation, error) {
 					if start != -1 && end != -1 && start+5 < end {
 						conv.Cwd = content[start+5 : end]
 					}
-					
+
 					content = StripSystemTags(content)
 					if content != "" {
 						conv.Messages = append(conv.Messages, models.Message{Role: role, Content: content, IsThought: isThought})
@@ -244,6 +253,87 @@ func (p *codexProvider) parseFile(path string) (models.Conversation, error) {
 	}
 
 	return conv, nil
+}
+
+// renderCodexTool turns a codex tool-activity payload (command execution, patch
+// application, MCP/custom tool call) into a readable transcript entry. It returns
+// an empty string for payload types that are not tool activity.
+func renderCodexTool(payload map[string]interface{}) string {
+	typ, _ := payload["type"].(string)
+	str := func(key string) string {
+		s, _ := payload[key].(string)
+		return s
+	}
+
+	switch typ {
+	case "function_call":
+		name := str("name")
+		args := str("arguments")
+		if name == "exec_command" {
+			if cmd := extractJSONField(args, "cmd"); cmd != "" {
+				return "$ " + cmd
+			}
+		}
+		if args != "" {
+			return fmt.Sprintf("[Tool Call: %s] %s", name, args)
+		}
+		return fmt.Sprintf("[Tool Call: %s]", name)
+
+	case "function_call_output":
+		if out := str("output"); out != "" {
+			return out
+		}
+
+	case "custom_tool_call":
+		name := str("name")
+		input := str("input")
+		if name == "apply_patch" {
+			return "[Tool Call: apply_patch]\n" + input
+		}
+		if input != "" {
+			return fmt.Sprintf("[Tool Call: %s] %s", name, input)
+		}
+		return fmt.Sprintf("[Tool Call: %s]", name)
+
+	case "custom_tool_call_output":
+		if out := str("output"); out != "" {
+			return out
+		}
+
+	case "patch_apply_end":
+		var sb strings.Builder
+		if out := str("stdout"); out != "" {
+			sb.WriteString(out)
+		}
+		if errOut := str("stderr"); errOut != "" {
+			sb.WriteString(errOut)
+		}
+		return strings.TrimSpace(sb.String())
+
+	case "exec_command_end":
+		if out := str("stdout"); out != "" {
+			return out
+		}
+
+	case "mcp_tool_call_end":
+		if inv, ok := payload["invocation"].(map[string]interface{}); ok {
+			server, _ := inv["server"].(string)
+			tool, _ := inv["tool"].(string)
+			return fmt.Sprintf("[MCP Call: %s/%s]", server, tool)
+		}
+	}
+
+	return ""
+}
+
+// extractJSONField unmarshals a JSON object string and returns the named string field.
+func extractJSONField(jsonStr, field string) string {
+	var obj map[string]interface{}
+	if err := json.Unmarshal([]byte(jsonStr), &obj); err != nil {
+		return ""
+	}
+	s, _ := obj[field].(string)
+	return s
 }
 
 func (p *codexProvider) ResumeSpec(
