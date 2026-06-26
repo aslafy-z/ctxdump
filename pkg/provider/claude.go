@@ -32,7 +32,10 @@ func (p *claudeProvider) List(opts Options) ([]models.Conversation, error) {
 				return nil
 			}
 			if d.IsDir() {
-				if d.Name() == "plugins" {
+				// Skip plugin bundles and subagent (sidechain) transcripts, which
+				// live under a `subagents/` directory and are not standalone
+				// conversations.
+				if d.Name() == "plugins" || d.Name() == "subagents" {
 					return fs.SkipDir
 				}
 				return nil

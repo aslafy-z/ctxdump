@@ -71,3 +71,21 @@ func TestClaudeProviderListPathFallback(t *testing.T) {
 		t.Errorf("did not find mock_jsonl.jsonl in List output")
 	}
 }
+
+func TestClaudeProviderListIgnoresSubagents(t *testing.T) {
+	p := NewClaudeProvider()
+
+	absPath, _ := filepath.Abs("../../testdata/claude")
+	opts := Options{CustomPath: absPath}
+
+	convs, err := p.List(opts)
+	if err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+
+	for _, c := range convs {
+		if c.ID == "agent-mock.jsonl" {
+			t.Errorf("subagent transcript agent-mock.jsonl should be excluded from List output")
+		}
+	}
+}
