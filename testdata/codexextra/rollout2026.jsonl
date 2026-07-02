@@ -1,0 +1,9 @@
+{"timestamp":"2026-06-27T09:19:07Z","type":"session_meta","payload":{"session_id":"019f0860-2413-7282-b259-52d0c9fde043","id":"019f0860-2413-7282-b259-52d0c9fde043","cwd":"/home/u/proj"}}
+{"timestamp":"2026-06-27T09:19:08Z","type":"event_msg","payload":{"type":"task_started"}}
+{"timestamp":"2026-06-27T09:19:09Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"the task"}]}}
+{"timestamp":"2026-06-27T09:19:09Z","type":"event_msg","payload":{"type":"user_message","message":"the task"}}
+{"timestamp":"2026-06-27T09:19:12Z","type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"thinking..."}],"encrypted_content":"gAAAsecretshouldnotappear"}}
+{"timestamp":"2026-06-27T09:19:14Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"ls\"}"}}
+{"timestamp":"2026-06-27T09:19:15Z","type":"response_item","payload":{"type":"function_call_output","output":"file1\nfile2"}}
+{"timestamp":"2026-06-27T09:19:19Z","type":"event_msg","payload":{"type":"agent_message","message":"done"}}
+{"timestamp":"2026-06-27T09:19:20Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}

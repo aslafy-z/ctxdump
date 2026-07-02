@@ -1,0 +1,4 @@
+{"id":"5a2712de-0000-0000-0000-000000000000","timestamp":"2025-08-29T13:06:04Z","git":{}}
+{"record_type":"state"}
+{"type":"message","id":null,"role":"user","content":[{"type":"input_text","text":"hello 2025"}]}
+{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}

@@ -3,14 +3,32 @@ package formatter
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/user/ctxdump/pkg/models"
 )
 
-// ValidFormats lists all supported output formats.
+// ValidFormats lists the canonical output formats. "plain" is accepted as an
+// alias of "text" (see IsValidFormat) but is intentionally kept out of this list
+// so the TUI format cycle does not offer the same output twice.
 var ValidFormats = []string{"agent", "markdown", "text", "raw", "json", "jsonl", "path"}
+
+// IsValidFormat reports whether name is a supported output format, accepting the
+// "plain" alias of "text".
+func IsValidFormat(name string) bool {
+	if name == "plain" {
+		return true
+	}
+	for _, f := range ValidFormats {
+		if f == name {
+			return true
+		}
+	}
+	return false
+}
 
 // Options controls how conversations are formatted.
 type Options struct {
@@ -75,14 +93,14 @@ func formatAgent(conv models.Conversation, opts Options) (string, error) {
 	var sb strings.Builder
 
 	sb.WriteString("---\n")
-	sb.WriteString(fmt.Sprintf("format: agent-handoff-v1\n"))
-	sb.WriteString(fmt.Sprintf("source: %s\n", conv.Provider))
-	sb.WriteString(fmt.Sprintf("session_id: %s\n", conv.ID))
+	sb.WriteString("format: agent-handoff-v1\n")
+	sb.WriteString(fmt.Sprintf("source: %s\n", yamlString(conv.Provider)))
+	sb.WriteString(fmt.Sprintf("session_id: %s\n", yamlString(conv.ID)))
 	if conv.FilePath != "" {
-		sb.WriteString(fmt.Sprintf("session_log: %s\n", conv.FilePath))
+		sb.WriteString(fmt.Sprintf("session_log: %s\n", yamlString(conv.FilePath)))
 	}
 	if conv.Cwd != "" {
-		sb.WriteString(fmt.Sprintf("workspace: %s\n", conv.Cwd))
+		sb.WriteString(fmt.Sprintf("workspace: %s\n", yamlString(conv.Cwd)))
 	}
 	sb.WriteString(fmt.Sprintf("updated_at: %s\n", conv.UpdatedAt.Format(time.RFC3339)))
 	sb.WriteString("runtime: closed\n")
@@ -105,7 +123,10 @@ func formatAgent(conv models.Conversation, opts Options) (string, error) {
 		if content == "" {
 			continue // Drop empty
 		}
-		
+		// Neutralize any literal closing tag so transcript content cannot break
+		// out of the <transcript> wrapper.
+		content = strings.ReplaceAll(content, "</transcript>", "<\\/transcript>")
+
 		role := m.Role
 		if role == "" {
 			role = "unknown"
@@ -132,13 +153,18 @@ func formatAgent(conv models.Conversation, opts Options) (string, error) {
 		}
 
 		if !opts.Full && len(content) > limit {
-			omitted := len(content) - limit
-			content = content[:limit] + fmt.Sprintf("\n\n[truncated: %d bytes omitted, use --full]", omitted)
+			truncated := models.TruncateBytes(content, limit)
+			omitted := len(content) - len(truncated)
+			content = truncated + fmt.Sprintf("\n\n[truncated: %d bytes omitted, use --full]", omitted)
 		}
 
 		sb.WriteString(fmt.Sprintf("[%s]\n", role))
 		if opts.Timestamps {
-			sb.WriteString(fmt.Sprintf("(%s)\n", conv.UpdatedAt.Format(time.RFC3339)))
+			ts := m.Timestamp
+			if ts.IsZero() {
+				ts = conv.UpdatedAt
+			}
+			sb.WriteString(fmt.Sprintf("(%s)\n", ts.Format(time.RFC3339)))
 		}
 		sb.WriteString(content)
 		sb.WriteString("\n\n")
@@ -166,11 +192,28 @@ func formatMarkdown(conv models.Conversation) (string, error) {
 		if m.Role == "assistant" {
 			roleTitle = "Assistant"
 		} else if m.Role == "tool" || m.Role == "system" {
-			roleTitle = strings.Title(m.Role)
+			roleTitle = capitalize(m.Role)
 		}
 		sb.WriteString(fmt.Sprintf("## %s\n\n%s\n\n", roleTitle, m.Content))
 	}
 	return sb.String(), nil
+}
+
+// yamlString renders s as a safe double-quoted YAML scalar, escaping quotes,
+// backslashes, and control characters (colons, newlines, leading indicators
+// would otherwise break the frontmatter).
+func yamlString(s string) string {
+	return strconv.Quote(s)
+}
+
+// capitalize upper-cases the first rune of s.
+func capitalize(s string) string {
+	if s == "" {
+		return s
+	}
+	r := []rune(s)
+	r[0] = unicode.ToUpper(r[0])
+	return string(r)
 }
 
 // HumanizeTime converts a time.Time into a relative human-readable string.

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/user/ctxdump/pkg/models"
 )
@@ -60,13 +61,13 @@ func (p *codexProvider) List(opts Options) ([]models.Conversation, error) {
 
 					snippet = strings.ReplaceAll(snippet, "\n", " ")
 					if len(snippet) > 100 {
-						snippet = snippet[:97] + "..."
+						snippet = models.TruncateRunes(snippet, 97) + "..."
 					}
 
 					if title == "" {
 						title = snippet
 						if len(title) > 50 {
-							title = title[:47] + "..."
+							title = models.TruncateRunes(title, 47) + "..."
 						}
 					}
 				}
@@ -123,136 +124,213 @@ func (p *codexProvider) parseFile(path string) (models.Conversation, error) {
 	if err != nil {
 		return models.Conversation{}, err
 	}
-	info, err := os.Stat(path)
-	modTime := info.ModTime()
 
 	conv := models.Conversation{
-		ID:        filepath.Base(path),
-		Provider:  p.Name(),
-		FilePath:  path,
-		UpdatedAt: modTime,
-		Raw:       data,
+		ID:       filepath.Base(path),
+		Provider: p.Name(),
+		FilePath: path,
+		Raw:      data,
+	}
+	if info, err := os.Stat(path); err == nil {
+		conv.UpdatedAt = info.ModTime()
 	}
 
-	// Try best-effort parsing (dumb mode)
+	// Whole-file JSON object carrying an explicit messages array (simple shape).
 	var obj map[string]interface{}
-	if err := json.Unmarshal(data, &obj); err == nil {
-		if id, ok := obj["sessionId"].(string); ok {
-			conv.ResumeID = id
-		} else if id, ok := obj["session_id"].(string); ok {
-			conv.ResumeID = id
-		} else if id, ok := obj["id"].(string); ok {
-			conv.ResumeID = id
+	if json.Unmarshal(data, &obj) == nil {
+		if _, ok := obj["messages"].([]interface{}); ok {
+			parseCodexObject(&conv, obj)
+			return conv, nil
 		}
-		if title, ok := obj["title"].(string); ok {
+	}
+
+	// JSONL rollout: one record per line. Grow the buffer well past bufio's 64KB
+	// default so a single long tool-output line cannot truncate the rest of the file.
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	scanner.Buffer(make([]byte, 0, 256*1024), 10*1024*1024)
+	seen := make(map[string]bool)
+	var newest time.Time
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var rec map[string]interface{}
+		if json.Unmarshal(line, &rec) != nil {
+			continue
+		}
+
+		ts := parseRFC3339(rec["timestamp"])
+		if ts.After(newest) {
+			newest = ts
+		}
+		if title, ok := rec["title"].(string); ok && conv.Title == "" {
 			conv.Title = title
 		}
-		if msgs, ok := obj["messages"].([]interface{}); ok {
-			for _, m := range msgs {
-				if mmap, ok := m.(map[string]interface{}); ok {
-					role, _ := mmap["role"].(string)
-					content, _ := mmap["content"].(string)
-					if content != "" {
-						start := strings.Index(content, "<cwd>")
-						end := strings.Index(content, "</cwd>")
-						if start != -1 && end != -1 && start+5 < end {
-							conv.Cwd = content[start+5 : end]
-						}
 
-						content = StripSystemTags(content)
-						if content != "" {
-							conv.Messages = append(conv.Messages, models.Message{Role: role, Content: content})
-						}
-					}
-				}
-			}
-		}
-	} else {
-		scanner := bufio.NewScanner(bytes.NewReader(data))
-		for scanner.Scan() {
-			line := scanner.Bytes()
-			if len(bytes.TrimSpace(line)) == 0 {
-				continue
-			}
-			var mobj map[string]interface{}
-			if err := json.Unmarshal(line, &mobj); err == nil {
+		recType, _ := rec["type"].(string)
+		if pl, ok := rec["payload"].(map[string]interface{}); ok {
+			switch recType {
+			case "session_meta":
 				if conv.ResumeID == "" {
-					if id, ok := mobj["sessionId"].(string); ok {
-						conv.ResumeID = id
-					} else if id, ok := mobj["session_id"].(string); ok {
-						conv.ResumeID = id
-					} else if id, ok := mobj["id"].(string); ok {
-						conv.ResumeID = id
+					conv.ResumeID = codexID(pl)
+				}
+				if cwd, ok := pl["cwd"].(string); ok && cwd != "" {
+					conv.Cwd = cwd
+				}
+			case "turn_context":
+				if conv.Cwd == "" {
+					if cwd, ok := pl["cwd"].(string); ok {
+						conv.Cwd = cwd
 					}
 				}
-				if title, ok := mobj["title"].(string); ok && conv.Title == "" {
-					conv.Title = title
-				}
-				role, _ := mobj["role"].(string)
-				content, _ := mobj["content"].(string)
-
-				isThought := false
-				if payload, ok := mobj["payload"].(map[string]interface{}); ok {
-					if r, ok := payload["role"].(string); ok {
-						role = r
-					}
-
-					// Tool activity (commands, patches, MCP calls) lives in dedicated
-					// payload types that carry no "content"/"message" field. Render them
-					// explicitly so the work performed is visible in the transcript.
-					if tool := renderCodexTool(payload); tool != "" {
-						conv.Messages = append(conv.Messages, models.Message{Role: "tool", Content: tool})
-						continue
-					}
-
-					if t, ok := payload["type"].(string); ok {
-						if t == "user_message" {
-							role = "user"
-						} else if t == "thought" || t == "commentary" || t == "thinking" {
-							isThought = true
-							if role == "" {
-								role = "assistant"
-							}
-						}
-					}
-
-					if c, ok := payload["content"].([]interface{}); ok && len(c) > 0 {
-						if cObj, ok := c[0].(map[string]interface{}); ok {
-							if text, ok := cObj["text"].(string); ok {
-								content = text
-							}
-						}
-					} else if msg, ok := payload["message"].(string); ok {
-						content = msg
-					}
-				}
-
-				// Sometimes thoughts don't have a payload type but are identified by empty role or "thought" role
-				if role == "thought" || role == "thinking" {
-					isThought = true
-					role = "assistant"
-				} else if role == "" && content != "" {
-					// In codex, empty role with content is almost always commentary/thought
-					isThought = true
-				}
-
-				if content != "" {
-					start := strings.Index(content, "<cwd>")
-					end := strings.Index(content, "</cwd>")
-					if start != -1 && end != -1 && start+5 < end {
-						conv.Cwd = content[start+5 : end]
-					}
-
-					content = StripSystemTags(content)
-					if content != "" {
-						conv.Messages = append(conv.Messages, models.Message{Role: role, Content: content, IsThought: isThought})
-					}
-				}
+			default:
+				applyCodexPayload(&conv, pl, ts, seen)
 			}
+		} else {
+			// Pre-payload (2025-era) records: the record itself is the payload.
+			if conv.ResumeID == "" {
+				conv.ResumeID = codexID(rec)
+			}
+			applyCodexPayload(&conv, rec, ts, seen)
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: codex: error reading %s: %v\n", path, err)
+	}
+	if !newest.IsZero() {
+		conv.UpdatedAt = newest
 	}
 
 	return conv, nil
+}
+
+// parseCodexObject handles the whole-file JSON object shape (a `messages` array
+// of `{role, content}` string entries).
+func parseCodexObject(conv *models.Conversation, obj map[string]interface{}) {
+	conv.ResumeID = codexID(obj)
+	if title, ok := obj["title"].(string); ok {
+		conv.Title = title
+	}
+	msgs, _ := obj["messages"].([]interface{})
+	for _, m := range msgs {
+		mmap, ok := m.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		role, _ := mmap["role"].(string)
+		content, _ := mmap["content"].(string)
+		if content == "" {
+			continue
+		}
+		if c := extractCwdTag(content); c != "" {
+			conv.Cwd = c
+		}
+		content = StripSystemTags(content)
+		if content != "" {
+			conv.Messages = append(conv.Messages, models.Message{Role: role, Content: content})
+		}
+	}
+}
+
+// applyCodexPayload interprets a single codex record payload (or, for pre-payload
+// rollouts, the record itself) and appends any resulting transcript message.
+// Conversational user/assistant text is deduplicated via seen so that the twin
+// `response_item/message` and `event_msg/*_message` copies collapse to one entry.
+func applyCodexPayload(conv *models.Conversation, pl map[string]interface{}, ts time.Time, seen map[string]bool) {
+	// Tool activity (commands, patches, MCP calls) carries no conversational text.
+	if tool := renderCodexTool(pl); tool != "" {
+		conv.Messages = append(conv.Messages, models.Message{Role: "tool", Content: tool, Timestamp: ts})
+		return
+	}
+
+	plType, _ := pl["type"].(string)
+	switch plType {
+	case "reasoning":
+		if text := joinCodexSummary(pl["summary"]); text != "" {
+			conv.Messages = append(conv.Messages, models.Message{
+				Role: "assistant", Content: text, IsThought: true, Timestamp: ts,
+			})
+		}
+	case "user_message":
+		if msg, ok := pl["message"].(string); ok {
+			appendCodexDedup(conv, seen, "user", msg, false, ts)
+		}
+	case "agent_message":
+		if msg, ok := pl["message"].(string); ok {
+			appendCodexDedup(conv, seen, "assistant", msg, false, ts)
+		}
+	case "message", "":
+		role, _ := pl["role"].(string)
+		content := joinTextBlocks(pl["content"])
+		if content == "" {
+			return
+		}
+		if c := extractCwdTag(content); c != "" && conv.Cwd == "" {
+			conv.Cwd = c
+		}
+		isThought := false
+		if role == "thought" || role == "thinking" {
+			isThought = true
+			role = "assistant"
+		} else if role == "" {
+			// Empty role with content in codex is almost always commentary/thought.
+			isThought = true
+		}
+		appendCodexDedup(conv, seen, role, content, isThought, ts)
+	}
+}
+
+// appendCodexDedup strips system noise, drops empties, and skips a message whose
+// content has already been appended (the response_item / event_msg duplication).
+func appendCodexDedup(conv *models.Conversation, seen map[string]bool, role, content string, isThought bool, ts time.Time) {
+	content = StripSystemTags(content)
+	if content == "" {
+		return
+	}
+	key := strings.TrimSpace(content)
+	if seen[key] {
+		return
+	}
+	seen[key] = true
+	conv.Messages = append(conv.Messages, models.Message{Role: role, Content: content, IsThought: isThought, Timestamp: ts})
+}
+
+// codexID returns the first present session identifier from a record/payload.
+func codexID(m map[string]interface{}) string {
+	for _, k := range []string{"id", "session_id", "sessionId"} {
+		if v, ok := m[k].(string); ok && v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// joinCodexSummary joins the text of a reasoning payload's summary blocks.
+func joinCodexSummary(v interface{}) string {
+	arr, ok := v.([]interface{})
+	if !ok {
+		return ""
+	}
+	var parts []string
+	for _, e := range arr {
+		if m, ok := e.(map[string]interface{}); ok {
+			if t, ok := m["text"].(string); ok && t != "" {
+				parts = append(parts, t)
+			}
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+// extractCwdTag returns the value inside a `<cwd>...</cwd>` marker, or "".
+func extractCwdTag(content string) string {
+	start := strings.Index(content, "<cwd>")
+	end := strings.Index(content, "</cwd>")
+	if start != -1 && end != -1 && start+5 < end {
+		return content[start+5 : end]
+	}
+	return ""
 }
 
 // renderCodexTool turns a codex tool-activity payload (command execution, patch

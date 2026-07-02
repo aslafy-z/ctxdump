@@ -1,0 +1,2 @@
+[{"sessionId":"c2c2aaaa-bbbb-cccc-dddd-eeeeffff0000","messageId":0,"type":"user","message":"Hey","timestamp":"2025-07-31T09:40:01Z"},
+ {"sessionId":"c2c2aaaa-bbbb-cccc-dddd-eeeeffff0000","messageId":1,"type":"assistant","message":"Hi there","timestamp":"2025-07-31T09:40:05Z"}]

@@ -1,0 +1,3 @@
+{"sessionId":"15e2aaaa-bbbb-cccc-dddd-eeeeffff1111","projectHash":"abc","startTime":"2026-06-22T18:26:23Z","lastUpdated":"2026-06-22T18:30:00Z","kind":"main"}
+{"$set":{"messages":[{"id":"m1","timestamp":"2026-06-22T18:26:23Z","type":"user","content":[{"text":"- **Workspace Directories:**\n  - /home/u/work/infra\nHello"}]}]}}
+{"$set":{"messages":[{"id":"m1","timestamp":"2026-06-22T18:26:23Z","type":"user","content":[{"text":"first"}]},{"id":"m2","timestamp":"2026-06-22T18:29:00Z","type":"assistant","content":[{"text":"second"}]}]}}

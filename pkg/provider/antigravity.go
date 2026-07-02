@@ -3,7 +3,7 @@ package provider
 import (
 	"bufio"
 	"encoding/json"
-	"io/fs"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -132,7 +132,7 @@ func (p *antigravityProvider) extractMeta(transcriptPath string) (title, snippet
 	scanner.Buffer(make([]byte, 0, 256*1024), 1024*1024)
 
 	lineCount := 0
-	for scanner.Scan() && lineCount < 80 {
+	for lineCount < 80 && scanner.Scan() {
 		lineCount++
 		line := scanner.Bytes()
 		if len(line) == 0 {
@@ -167,15 +167,8 @@ func (p *antigravityProvider) extractMeta(transcriptPath string) (title, snippet
 		}
 
 		// Prefer CWD from early tool calls (e.g. run_command or list_dir)
-		for _, call := range step.ToolCalls {
-			if cwdRaw, ok := call.Args["Cwd"]; ok && cwdRaw != "" {
-				cwd = strings.Trim(cwdRaw, `"`)
-				break
-			}
-			if dirRaw, ok := call.Args["DirectoryPath"]; ok && dirRaw != "" {
-				cwd = strings.Trim(dirRaw, `"`)
-				break
-			}
+		if c := firstToolCwd(step.ToolCalls); c != "" {
+			cwd = c
 		}
 	}
 
@@ -269,15 +262,8 @@ func (p *antigravityProvider) parseTranscript(transcriptPath string) (models.Con
 		case step.Source == "MODEL" && step.Type == "PLANNER_RESPONSE":
 			// Prefer CWD from early tool calls
 			if conv.Cwd == "" || strings.Contains(conv.Cwd, ".gemini/antigravity") {
-				for _, call := range step.ToolCalls {
-					if cwdRaw, ok := call.Args["Cwd"]; ok && cwdRaw != "" {
-						conv.Cwd = strings.Trim(cwdRaw, `"`)
-						break
-					}
-					if dirRaw, ok := call.Args["DirectoryPath"]; ok && dirRaw != "" {
-						conv.Cwd = strings.Trim(dirRaw, `"`)
-						break
-					}
+				if c := firstToolCwd(step.ToolCalls); c != "" {
+					conv.Cwd = c
 				}
 			}
 			// Add thinking as a thought message
@@ -318,7 +304,7 @@ func (p *antigravityProvider) parseTranscript(transcriptPath string) (models.Con
 				})
 			}
 
-		// Skip system noise: CONVERSATION_HISTORY, KNOWLEDGE_ARTIFACTS, EPHEMERAL_MESSAGE, SYSTEM_MESSAGE
+			// Skip system noise: CONVERSATION_HISTORY, KNOWLEDGE_ARTIFACTS, EPHEMERAL_MESSAGE, SYSTEM_MESSAGE
 		}
 	}
 
@@ -327,20 +313,37 @@ func (p *antigravityProvider) parseTranscript(transcriptPath string) (models.Con
 
 // transcriptStep represents a single line from transcript.jsonl.
 type transcriptStep struct {
-	StepIndex int       `json:"step_index"`
-	Source    string    `json:"source"`
-	Type      string    `json:"type"`
-	Status    string    `json:"status"`
-	CreatedAt time.Time `json:"created_at"`
-	Content   string    `json:"content"`
-	Thinking  string    `json:"thinking"`
-	Error     string    `json:"error"`
+	StepIndex int        `json:"step_index"`
+	Source    string     `json:"source"`
+	Type      string     `json:"type"`
+	Status    string     `json:"status"`
+	CreatedAt time.Time  `json:"created_at"`
+	Content   string     `json:"content"`
+	Thinking  string     `json:"thinking"`
+	Error     string     `json:"error"`
 	ToolCalls []toolCall `json:"tool_calls"`
 }
 
 type toolCall struct {
-	Name string            `json:"name"`
-	Args map[string]string `json:"args"`
+	Name string                 `json:"name"`
+	Args map[string]interface{} `json:"args"`
+}
+
+// toolArgString renders a tool-call argument value as a string. String values
+// pass through; numbers, booleans, and nested objects are JSON-encoded so a
+// single non-string argument no longer fails the whole step's unmarshal.
+func toolArgString(v interface{}) string {
+	switch t := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return t
+	default:
+		if b, err := json.Marshal(v); err == nil {
+			return string(b)
+		}
+		return fmt.Sprintf("%v", v)
+	}
 }
 
 // extractUserRequest pulls the content between <USER_REQUEST> tags,
@@ -348,7 +351,7 @@ type toolCall struct {
 func extractUserRequest(content string) string {
 	start := strings.Index(content, "<USER_REQUEST>")
 	end := strings.Index(content, "</USER_REQUEST>")
-	
+
 	if start != -1 {
 		if end != -1 && end > start {
 			content = content[start+len("<USER_REQUEST>") : end]
@@ -356,12 +359,12 @@ func extractUserRequest(content string) string {
 			content = content[start+len("<USER_REQUEST>"):]
 		}
 	}
-	
+
 	// Strip metadata tags even if they are truncated
 	for _, tag := range []string{"ADDITIONAL_METADATA", "USER_SETTINGS_CHANGE", "EPHEMERAL_MESSAGE"} {
 		startTag := "<" + tag + ">"
 		endTag := "</" + tag + ">"
-		
+
 		for {
 			ts := strings.Index(content, startTag)
 			if ts == -1 {
@@ -412,143 +415,22 @@ func extractCwdFromMetadata(content string) string {
 	return ""
 }
 
-// stripXMLBlock removes a <tag>...</tag> block from content.
-func stripXMLBlock(content, tag string) string {
-	startTag := "<" + tag + ">"
-	endTag := "</" + tag + ">"
-	for {
-		start := strings.Index(content, startTag)
-		if start == -1 {
-			break
-		}
-		end := strings.Index(content, endTag)
-		if end == -1 || end < start {
-			break
-		}
-		content = content[:start] + content[end+len(endTag):]
-	}
-	return content
-}
-
-// findTranscripts walks a directory looking for transcript.jsonl files
-// following the pattern: <dir>/<uuid>/.system_generated/logs/transcript.jsonl
-func findTranscripts(dir string) []string {
-	var results []string
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		transcriptPath := filepath.Join(dir, entry.Name(), ".system_generated", "logs", "transcript.jsonl")
-		if _, err := os.Stat(transcriptPath); err == nil {
-			results = append(results, transcriptPath)
-		}
-	}
-	return results
-}
-
-// walkBrainDir is a specialized walker for brain directories that avoids
-// recursing into deep directory structures. It only looks one level deep.
-func (p *antigravityProvider) walkBrainDir(brainDir string, fn func(convID string, transcriptPath string)) {
-	entries, err := os.ReadDir(brainDir)
-	if err != nil {
-		return
-	}
-	// Skip known non-conversation directories
-	skipDirs := map[string]bool{
-		"scratch": true, "plugins": true, "mcp": true,
-		"conversations": true, "knowledge": true, "context_state": true,
-		"code_tracker": true, "html_artifacts": true, "implicit": true,
-		"playground": true, "annotations": true, "bin": true,
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() || skipDirs[entry.Name()] {
-			continue
-		}
-		transcriptPath := filepath.Join(brainDir, entry.Name(), ".system_generated", "logs", "transcript.jsonl")
-		if info, err := os.Stat(transcriptPath); err == nil && !info.IsDir() {
-			fn(entry.Name(), transcriptPath)
-		}
-	}
-}
-
-// Ensure antigravityProvider does not accidentally walk into non-brain directories
-// when using WalkDir by restricting to known brain directory structures.
-var _ Provider = (*antigravityProvider)(nil)
-
-// Helper to check if a path looks like a brain directory (contains UUID dirs with transcripts).
-func isBrainDir(path string) bool {
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		return false
-	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		t := filepath.Join(path, e.Name(), ".system_generated", "logs", "transcript.jsonl")
-		if _, err := os.Stat(t); err == nil {
-			return true
-		}
-	}
-	return false
-}
-
-// CustomPath support: if --path points to a single conversation dir or a brain dir,
-// handle both cases gracefully.
-func (p *antigravityProvider) resolveCustomPath(customPath string) []string {
-	// Check if this is a brain directory (contains UUID subdirs)
-	if isBrainDir(customPath) {
-		return []string{customPath}
-	}
-
-	// Check if it's a single conversation directory
-	transcript := filepath.Join(customPath, ".system_generated", "logs", "transcript.jsonl")
-	if _, err := os.Stat(transcript); err == nil {
-		// It's a single conversation dir — wrap it so List/Dump can find it
-		return []string{filepath.Dir(customPath)}
-	}
-
-	// Maybe it's a parent dir that contains brain/
-	brainPath := filepath.Join(customPath, "brain")
-	if isBrainDir(brainPath) {
-		return []string{brainPath}
-	}
-
-	// Walk to discover any transcript.jsonl files
-	var results []string
-	filepath.WalkDir(customPath, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.Name() == "transcript.jsonl" && !d.IsDir() {
-			// Go up to the brain dir level
-			// path = .../brain/<uuid>/.system_generated/logs/transcript.jsonl
-			logsDir := filepath.Dir(path)       // .../logs
-			sysGenDir := filepath.Dir(logsDir)  // .../.system_generated
-			convDir := filepath.Dir(sysGenDir)  // .../<uuid>
-			brainDir := filepath.Dir(convDir)   // .../brain
-			if !contains(results, brainDir) {
-				results = append(results, brainDir)
+// firstToolCwd returns the first working directory found among a step's tool
+// calls (from a `Cwd` or `DirectoryPath` argument), or "".
+func firstToolCwd(calls []toolCall) string {
+	for _, call := range calls {
+		if v, ok := call.Args["Cwd"]; ok {
+			if s := strings.Trim(toolArgString(v), `"`); s != "" {
+				return s
 			}
 		}
-		return nil
-	})
-	if len(results) > 0 {
-		return results
-	}
-
-	return []string{customPath}
-}
-
-func contains(slice []string, s string) bool {
-	for _, v := range slice {
-		if v == s {
-			return true
+		if v, ok := call.Args["DirectoryPath"]; ok {
+			if s := strings.Trim(toolArgString(v), `"`); s != "" {
+				return s
+			}
 		}
 	}
-	return false
+	return ""
 }
+
+var _ Provider = (*antigravityProvider)(nil)

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/user/ctxdump/pkg/models"
 )
@@ -44,14 +45,23 @@ func (p *claudeProvider) List(opts Options) ([]models.Conversation, error) {
 			if name == "settings.json" || name == "settings.local.json" || name == "stats-cache.json" || name == "sessions-index.json" || name == "plugin.json" || name == ".mcp.json" {
 				return nil
 			}
-			title, snippet, cwd, resumeID := extractClaudeMeta(path)
+			title, snippet, cwd, resumeID, isSidechain := extractClaudeMeta(path)
 
-			// Fallback: if not found in file and looks like an encoded path
+			// Subagent (sidechain) transcripts are not standalone conversations.
+			// They usually live under a `subagents/` directory (skipped above), but
+			// exclude any that are recorded inline as well.
+			if isSidechain {
+				return nil
+			}
+
+			// Fallback: if not found in file and looks like an encoded path.
 			if cwd == "" && strings.Contains(path, ".claude/projects/") {
 				dir := filepath.Dir(path)
 				base := filepath.Base(dir)
-				// Note: this naive decoding replaces all hyphens, which breaks paths with natural hyphens.
-				// However, it's better than nothing for legacy files missing the `cwd` field.
+				// The encoding replaces path separators with hyphens, so this naive
+				// decode is lossy for directories that contain literal hyphens. It is
+				// kept as a best-effort fallback for legacy files missing `cwd`;
+				// faithful reconstruction is a follow-up.
 				cwd = strings.ReplaceAll(base, "-", "/")
 			}
 
@@ -63,7 +73,7 @@ func (p *claudeProvider) List(opts Options) ([]models.Conversation, error) {
 				if title == "" && snippet != "" {
 					title = snippet
 					if len(title) > 50 {
-						title = title[:47] + "..."
+						title = models.TruncateRunes(title, 47) + "..."
 					}
 				}
 				conversations = append(conversations, models.Conversation{
@@ -86,23 +96,22 @@ func (p *claudeProvider) List(opts Options) ([]models.Conversation, error) {
 	return conversations, nil
 }
 
-func extractClaudeMeta(path string) (string, string, string, string) {
+func extractClaudeMeta(path string) (title, firstMessage, cwd, resumeID string, isSidechain bool) {
 	f, err := os.Open(path)
 	if err != nil {
-		return "", "", "", ""
+		return "", "", "", "", false
 	}
 	defer f.Close()
 	scanner := bufio.NewScanner(f)
 	// Increase buffer for very large lines (like attachments)
 	scanner.Buffer(make([]byte, 0, 256*1024), 2*1024*1024)
 
-	var title string
-	var firstMessage string
-	var cwd string
-	var resumeID string
-
 	for i := 0; i < 200 && scanner.Scan(); i++ {
 		line := scanner.Text()
+
+		if !isSidechain && strings.Contains(line, `"isSidechain":true`) {
+			isSidechain = true
+		}
 
 		// Fast-path json parsing for lines containing known keys to avoid unmarshaling everything
 		needsParse := false
@@ -176,11 +185,11 @@ func extractClaudeMeta(path string) (string, string, string, string) {
 
 		firstMessage = strings.ReplaceAll(firstMessage, "\n", " ")
 		if len(firstMessage) > 100 {
-			firstMessage = firstMessage[:97] + "..."
+			firstMessage = models.TruncateRunes(firstMessage, 97) + "..."
 		}
 	}
 
-	return title, firstMessage, cwd, resumeID
+	return title, firstMessage, cwd, resumeID, isSidechain
 }
 
 func (p *claudeProvider) Dump(idOrFile string, opts Options) (models.Conversation, error) {
@@ -225,138 +234,161 @@ func (p *claudeProvider) parseFile(path string) (models.Conversation, error) {
 	if err != nil {
 		return models.Conversation{}, err
 	}
-	info, err := os.Stat(path)
-	modTime := info.ModTime()
 
 	conv := models.Conversation{
-		ID:        filepath.Base(path),
-		Provider:  p.Name(),
-		FilePath:  path,
-		UpdatedAt: modTime,
-		Raw:       data,
+		ID:       filepath.Base(path),
+		Provider: p.Name(),
+		FilePath: path,
+		Raw:      data,
+	}
+	if info, err := os.Stat(path); err == nil {
+		conv.UpdatedAt = info.ModTime()
 	}
 
-	// Check if it's JSONL (multiple lines of JSON objects)
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) > 1 && strings.HasPrefix(lines[0], "{") && strings.HasPrefix(lines[1], "{") {
-		for _, line := range lines {
-			if strings.TrimSpace(line) == "" {
-				continue
-			}
-			var obj map[string]interface{}
-			if err := json.Unmarshal([]byte(line), &obj); err == nil {
-				// Extract ResumeID
-				if conv.ResumeID == "" {
-					if id, ok := obj["sessionId"].(string); ok {
-						conv.ResumeID = id
-					} else if id, ok := obj["session_id"].(string); ok {
-						conv.ResumeID = id
-					}
-				}
-
-				// Extract Cwd
-				if conv.Cwd == "" {
-					if cwd, ok := obj["cwd"].(string); ok {
-						conv.Cwd = cwd
-					}
-				}
-
-				// Try to extract title if available
-				if conv.Title == "" {
-					if t, ok := obj["aiTitle"].(string); ok {
-						conv.Title = t
-					} else if t, ok := obj["title"].(string); ok {
-						conv.Title = t
-					}
-				}
-
-				if msgObj, ok := obj["message"].(map[string]interface{}); ok {
-					role, _ := msgObj["role"].(string)
-
-					// Handle content
-					var contentStr string
-					isThought := false
-
-					if content, ok := msgObj["content"].(string); ok {
-						contentStr = content
-					} else if contentArr, ok := msgObj["content"].([]interface{}); ok {
-						for _, cElem := range contentArr {
-							if cMap, ok := cElem.(map[string]interface{}); ok {
-								if cType, _ := cMap["type"].(string); cType == "thinking" {
-									if t, ok := cMap["thinking"].(string); ok {
-										contentStr += t
-										isThought = true
-									}
-								} else if cType == "tool_use" {
-									contentStr += renderToolUse(cMap)
-								} else if cType == "tool_result" {
-									contentStr += renderToolResult(cMap)
-								} else {
-									if t, ok := cMap["text"].(string); ok {
-										contentStr += t
-									}
-								}
-							}
-						}
-					}
-					if contentStr != "" {
-						conv.Messages = append(conv.Messages, models.Message{Role: role, Content: contentStr, IsThought: isThought})
-					}
-				} else if typ, ok := obj["type"].(string); ok && typ == "system" {
-					if content, ok := obj["content"].(string); ok && content != "" {
-						conv.Messages = append(conv.Messages, models.Message{Role: "system", Content: content})
-					} else if contentMap, ok := obj["content"].(map[string]interface{}); ok {
-						if text, ok := contentMap["text"].(string); ok && text != "" {
-							conv.Messages = append(conv.Messages, models.Message{Role: "system", Content: text})
-						}
-					}
-				} else if typ == "attachment" {
-					if att, ok := obj["attachment"].(map[string]interface{}); ok {
-						if stdout, ok := att["stdout"].(string); ok && stdout != "" {
-							conv.Messages = append(conv.Messages, models.Message{Role: "tool", Content: stdout})
-						}
-					}
-				}
-			}
+	// A whole-file object with an explicit messages array is the legacy shape;
+	// anything else is JSONL, including single-line session files that a naive
+	// line-count check would misclassify as legacy.
+	var whole map[string]interface{}
+	if json.Unmarshal(data, &whole) == nil {
+		if _, ok := whole["messages"].([]interface{}); ok {
+			parseClaudeLegacy(&conv, whole)
+			return conv, nil
 		}
-	} else {
-		// Legacy single JSON format
+	}
+
+	var newest time.Time
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
 		var obj map[string]interface{}
-		if err := json.Unmarshal(data, &obj); err == nil {
-			if id, ok := obj["sessionId"].(string); ok {
-				conv.ResumeID = id
-			} else if id, ok := obj["session_id"].(string); ok {
-				conv.ResumeID = id
-			}
-			if title, ok := obj["title"].(string); ok {
-				conv.Title = title
-			}
-			if msgs, ok := obj["messages"].([]interface{}); ok {
-				for _, m := range msgs {
-					if mmap, ok := m.(map[string]interface{}); ok {
-						role, _ := mmap["role"].(string)
-						var contentStr string
-						if content, ok := mmap["content"].(string); ok {
-							contentStr = content
-						} else if contentArr, ok := mmap["content"].([]interface{}); ok {
-							for _, cElem := range contentArr {
-								if cMap, ok := cElem.(map[string]interface{}); ok {
-									if t, ok := cMap["text"].(string); ok {
-										contentStr += t
-									}
-								}
-							}
-						}
-						if contentStr != "" {
-							conv.Messages = append(conv.Messages, models.Message{Role: role, Content: contentStr})
-						}
-					}
-				}
-			}
+		if json.Unmarshal([]byte(line), &obj) != nil {
+			continue
 		}
+		ts := parseRFC3339(obj["timestamp"])
+		if ts.After(newest) {
+			newest = ts
+		}
+		parseClaudeLine(&conv, obj, ts)
+	}
+	if !newest.IsZero() {
+		conv.UpdatedAt = newest
 	}
 
 	return conv, nil
+}
+
+// parseClaudeLine interprets one JSONL record, updating conversation metadata and
+// appending any resulting message with its timestamp.
+func parseClaudeLine(conv *models.Conversation, obj map[string]interface{}, ts time.Time) {
+	if conv.ResumeID == "" {
+		if id, ok := obj["sessionId"].(string); ok {
+			conv.ResumeID = id
+		} else if id, ok := obj["session_id"].(string); ok {
+			conv.ResumeID = id
+		}
+	}
+	if conv.Cwd == "" {
+		if cwd, ok := obj["cwd"].(string); ok {
+			conv.Cwd = cwd
+		}
+	}
+	if conv.Title == "" {
+		if t, ok := obj["aiTitle"].(string); ok {
+			conv.Title = t
+		} else if t, ok := obj["title"].(string); ok {
+			conv.Title = t
+		}
+	}
+
+	if msgObj, ok := obj["message"].(map[string]interface{}); ok {
+		role, _ := msgObj["role"].(string)
+		var contentStr string
+		isThought := false
+
+		if content, ok := msgObj["content"].(string); ok {
+			contentStr = content
+		} else if contentArr, ok := msgObj["content"].([]interface{}); ok {
+			for _, cElem := range contentArr {
+				cMap, ok := cElem.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				switch cType, _ := cMap["type"].(string); cType {
+				case "thinking":
+					if t, ok := cMap["thinking"].(string); ok {
+						contentStr += t
+						isThought = true
+					}
+				case "tool_use":
+					contentStr += renderToolUse(cMap)
+				case "tool_result":
+					contentStr += renderToolResult(cMap)
+				default:
+					if t, ok := cMap["text"].(string); ok {
+						contentStr += t
+					}
+				}
+			}
+		}
+		if contentStr != "" {
+			conv.Messages = append(conv.Messages, models.Message{Role: role, Content: contentStr, IsThought: isThought, Timestamp: ts})
+		}
+		return
+	}
+
+	switch typ, _ := obj["type"].(string); typ {
+	case "system":
+		if content, ok := obj["content"].(string); ok && content != "" {
+			conv.Messages = append(conv.Messages, models.Message{Role: "system", Content: content, Timestamp: ts})
+		} else if contentMap, ok := obj["content"].(map[string]interface{}); ok {
+			if text, ok := contentMap["text"].(string); ok && text != "" {
+				conv.Messages = append(conv.Messages, models.Message{Role: "system", Content: text, Timestamp: ts})
+			}
+		}
+	case "attachment":
+		if att, ok := obj["attachment"].(map[string]interface{}); ok {
+			if stdout, ok := att["stdout"].(string); ok && stdout != "" {
+				conv.Messages = append(conv.Messages, models.Message{Role: "tool", Content: stdout, Timestamp: ts})
+			}
+		}
+	}
+}
+
+// parseClaudeLegacy interprets the legacy whole-file object shape.
+func parseClaudeLegacy(conv *models.Conversation, obj map[string]interface{}) {
+	if id, ok := obj["sessionId"].(string); ok {
+		conv.ResumeID = id
+	} else if id, ok := obj["session_id"].(string); ok {
+		conv.ResumeID = id
+	}
+	if title, ok := obj["title"].(string); ok {
+		conv.Title = title
+	}
+	msgs, _ := obj["messages"].([]interface{})
+	for _, m := range msgs {
+		mmap, ok := m.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		role, _ := mmap["role"].(string)
+		var contentStr string
+		if content, ok := mmap["content"].(string); ok {
+			contentStr = content
+		} else if contentArr, ok := mmap["content"].([]interface{}); ok {
+			for _, cElem := range contentArr {
+				if cMap, ok := cElem.(map[string]interface{}); ok {
+					if t, ok := cMap["text"].(string); ok {
+						contentStr += t
+					}
+				}
+			}
+		}
+		if contentStr != "" {
+			conv.Messages = append(conv.Messages, models.Message{Role: role, Content: contentStr})
+		}
+	}
 }
 
 // renderToolUse turns a tool_use content block into a readable representation,

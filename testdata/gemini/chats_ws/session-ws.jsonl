@@ -1,0 +1,2 @@
+{"sessionId":"77e2aaaa-bbbb-cccc-dddd-eeeeffff2222","projectHash":"abc","startTime":"2026-06-22T18:26:23Z","lastUpdated":"2026-06-22T18:30:00Z","kind":"main"}
+{"$set":{"messages":[{"id":"m1","timestamp":"2026-06-22T18:26:23Z","type":"user","content":[{"text":"- **Workspace Directories:**\n  - /home/u/work/infra\nHello there"}]},{"id":"m2","timestamp":"2026-06-22T18:29:00Z","type":"assistant","content":[{"text":"reply"}]}]}}
