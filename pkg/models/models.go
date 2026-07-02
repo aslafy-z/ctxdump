@@ -22,4 +22,5 @@ type Message struct {
 	Role      string // "user", "assistant", "tool"
 	Content   string
 	IsThought bool
+	Timestamp time.Time `json:",omitzero"`
 }
