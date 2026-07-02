@@ -1,0 +1,2 @@
+{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-01-01T00:00:00Z","content":"<USER_REQUEST>\nDo something\n</USER_REQUEST>"}
+{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-01-01T00:00:01Z","content":"resp","tool_calls":[{"name":"run","args":{"Cwd":"/proj","Count":3,"Flag":true,"Nested":{"a":1}}}]}
