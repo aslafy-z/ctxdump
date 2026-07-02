@@ -3,9 +3,45 @@ package provider
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/user/ctxdump/pkg/models"
 )
+
+// joinTextBlocks concatenates the text of a content field that may be a plain
+// string or an array of `{..., "text": ...}` blocks, as used by codex and gemini
+// records.
+func joinTextBlocks(v interface{}) string {
+	switch c := v.(type) {
+	case string:
+		return c
+	case []interface{}:
+		var sb strings.Builder
+		for _, e := range c {
+			if m, ok := e.(map[string]interface{}); ok {
+				if t, ok := m["text"].(string); ok {
+					sb.WriteString(t)
+				}
+			}
+		}
+		return sb.String()
+	}
+	return ""
+}
+
+// parseRFC3339 parses an RFC3339 timestamp from an untyped value, returning the
+// zero time on any failure.
+func parseRFC3339(v interface{}) time.Time {
+	s, ok := v.(string)
+	if !ok || s == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
 
 // UnifiedDiff renders a before/after pair as a unified diff for the given file,
 // so edits are presented consistently across providers.

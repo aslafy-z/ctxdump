@@ -27,8 +27,8 @@ func TestExtractClaudeMeta(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			absPath, _ := filepath.Abs(tc.filePath)
-			title, snippet, cwd, resumeID := extractClaudeMeta(absPath)
-			
+			title, snippet, cwd, resumeID, _ := extractClaudeMeta(absPath)
+
 			if title != tc.expectTitle {
 				t.Errorf("expected title %q, got %q", tc.expectTitle, title)
 			}
@@ -47,11 +47,11 @@ func TestExtractClaudeMeta(t *testing.T) {
 
 func TestClaudeProviderListPathFallback(t *testing.T) {
 	p := NewClaudeProvider()
-	
+
 	// Create a dummy option pointing to our testdata
 	absPath, _ := filepath.Abs("../../testdata/claude")
 	opts := Options{CustomPath: absPath}
-	
+
 	convs, err := p.List(opts)
 	if err != nil {
 		t.Fatalf("List failed: %v", err)
@@ -66,7 +66,7 @@ func TestClaudeProviderListPathFallback(t *testing.T) {
 			}
 		}
 	}
-	
+
 	if !found {
 		t.Errorf("did not find mock_jsonl.jsonl in List output")
 	}
