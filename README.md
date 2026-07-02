@@ -7,8 +7,8 @@
 
 It currently supports reading local history files from:
 - **Codex CLI** (`~/.codex/sessions`, `$CODEX_HOME/sessions`)
-- **Claude Code** (`~/.claude/conversations`, `~/.claude/`)
-- **Gemini CLI** (`~/.gemini/sessions`, `~/.config/gemini/sessions`)
+- **Claude Code** (`~/.claude/projects`, `~/.claude/tasks`)
+- **Gemini CLI** (`~/.gemini/tmp`)
 - **Antigravity IDE & Terminal Agents** (`~/.gemini/antigravity-ide/brain`, `~/.gemini/antigravity/brain`)
 
 
@@ -73,6 +73,10 @@ Dump the raw content of a conversation into a file:
 ```bash
 ctxdump dump <id-or-file> --output markdown > transcript.md
 ```
+
+> **Note:** `dump` defaults to the `agent` output format (a structured handoff
+> designed to be piped into another agent). `list` and `search` default to the
+> `table` format and accept only `table`, `json`, `jsonl`, and `path`.
 
 Dump a conversation, including hidden thoughts and timestamps:
 ```bash

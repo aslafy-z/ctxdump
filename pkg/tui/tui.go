@@ -20,35 +20,35 @@ type item struct {
 	conv models.Conversation
 }
 
-func (i item) Title() string { 
+func (i item) Title() string {
 	title := i.conv.Title
 	if title == "" {
 		title = i.conv.ID
 	}
-	
+
 	if title == i.conv.Snippet || i.conv.Snippet == "" || strings.HasPrefix(i.conv.Snippet, strings.TrimSuffix(title, "...")) {
 		if i.conv.Snippet != "" {
 			title = strings.ReplaceAll(i.conv.Snippet, "\n", " ")
 		}
 		return title
 	}
-	
+
 	greyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 	snippet := strings.ReplaceAll(i.conv.Snippet, "\n", " ")
-	return title + greyStyle.Render(" - " + snippet)
+	return title + greyStyle.Render(" - "+snippet)
 }
-func (i item) Description() string { 
+func (i item) Description() string {
 	path := i.conv.FilePath
 	if i.conv.Cwd != "" {
 		path = i.conv.Cwd
 	}
 	return fmt.Sprintf("[%s] %s - %s", i.conv.Provider, formatter.HumanizeTime(i.conv.UpdatedAt), path)
 }
-func (i item) FilterValue() string { 
+func (i item) FilterValue() string {
 	if i.conv.SearchContent != "" {
 		return i.conv.Title + " " + i.conv.Provider + " " + i.conv.Snippet + " " + i.conv.SearchContent
 	}
-	return i.conv.Title + " " + i.conv.Provider + " " + i.conv.Snippet 
+	return i.conv.Title + " " + i.conv.Provider + " " + i.conv.Snippet
 }
 
 type startLoadingMsg struct{}
@@ -174,24 +174,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.err = fmt.Errorf("failed to get provider: %v", err)
 					return m, tea.Quit
 				}
-				
+
 				fullConv, err := p.Dump(i.conv.FilePath, m.opts)
 				if err != nil {
 					m.err = fmt.Errorf("failed to dump conversation: %v", err)
 					return m, tea.Quit
 				}
-				
+
 				md, err := formatter.Format(fullConv, formatter.Options{Format: m.copyFormat})
 				if err != nil {
 					m.err = fmt.Errorf("failed to format conversation: %v", err)
 					return m, tea.Quit
 				}
-				
+
 				if err := clipboard.WriteAll(md); err != nil {
 					m.err = fmt.Errorf("clipboard error: %v", err)
 					return m, tea.Quit
 				}
-				
+
 				m.status = fmt.Sprintf("Copied '%s' to clipboard (Output: %s)!", i.Title(), m.copyFormat)
 				return m, tea.Quit
 			}
@@ -253,7 +253,6 @@ func (m model) View() string {
 	}
 	return docStyle.Render(m.list.View())
 }
-
 
 // Run starts the Bubble Tea UI for searching and copying/resuming conversations.
 // action can be "copy" or "resume". It returns the selected conversation if action is "resume".
@@ -344,7 +343,7 @@ func Run(conversations []models.Conversation, initialQuery string, startInFilter
 	if err != nil {
 		return nil, fmt.Errorf("error running program: %v", err)
 	}
-	
+
 	if fm, ok := finalModel.(model); ok {
 		if fm.err != nil {
 			return nil, fm.err
